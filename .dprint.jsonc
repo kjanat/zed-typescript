@@ -1,0 +1,28 @@
+{
+	"$schema": "https://dprint.dev/schemas/v0.json",
+	// update: git ls-remote "https://github.com/kjanat/kjanat.git" HEAD | awk '{print substr($1, 1, 8)}' | xargs -r -I{} sed -i -E 's#(github\.com/kjanat/kjanat/raw/)[0-9a-zA-Z]{4,40}(/configs/dprint\.remote\.json)#\1{}\2#g' .dprint.jsonc
+	"extends": "https://github.com/kjanat/kjanat/raw/7d87c3af/configs/dprint.remote.json",
+	"useTabs": true,
+	"jsonSchemaSort": { "associations": ["**/schema.json", "**/*.schema.json"] },
+	"json": { "trailingCommas": "maintain" },
+	"markdown": { "textWrap": "always", "emphasisKind": "asterisks", "lineWidth": 80 },
+	"markup": { "associations": ["!**/*.svg"] },
+	"yaml": { "printWidth": 160 },
+	"exec": {
+		"cwd": "${configDir}",
+		"cacheKey": "2",
+		"timeout": 30,
+		"commands": [
+			{
+				"command": "npx -y tombi format - --stdin-filename {{file_path}}",
+				"exts": ["toml"],
+				"cacheKeyFiles": ["tombi.toml"]
+			},
+			{ "command": "rustfmt", "exts": ["rs"], "cacheKeyFiles": ["rustfmt.toml"] },
+		]
+	},
+	"excludes": ["**/*.lock", "**/fixtures", "**/node_modules", "**/target"],
+	"plugins": [
+		"https://plugins.dprint.dev/exec-0.7.2.json@6c30bd00dfb176774ece412d0fbf149478269ecc92c55ab2d6f4116938ed993e",
+	],
+}

@@ -1,0 +1,26 @@
+id             = "typescript"
+name           = "TypeScript"
+version        = "0.0.1"
+schema_version = 1
+authors        = ["Kaj Kowalski <info@kajkowalski.nl>"]
+description    = "Runs the TypeScript 7 language server in Zed."
+repository     = "https://github.com/kjanat/zed-typescript"
+
+[language_servers.typescript]
+name      = "TypeScript"
+languages = ["JavaScript", "JSX", "TypeScript", "TSX"]
+
+[language_servers.typescript.language_ids]
+"JavaScript" = "javascript"
+"JSX"        = "javascriptreact"
+"TypeScript" = "typescript"
+"TSX"        = "typescriptreact"
+
+[[capabilities]]
+kind    = "npm:install"
+package = "typescript"
+
+[[capabilities]]
+kind    = "process:exec"
+command = "node"
+args    = ["**"]
