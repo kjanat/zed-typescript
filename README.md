@@ -10,11 +10,16 @@ Further read: [Announcing TypeScript 7.0].
 
 ## Server Resolution
 
-The extension resolves the server in this order:
+The extension resolves the `tsc` bin (to run via node) preferring the project's own TypeScript 7+ if
+present:
 
-1. Uses `lsp.typescript.settings.tsdk.path` / `tsdk.path` when set.
-2. Otherwise installs `typescript` with Zed's npm helper.
-3. Runs `node node_modules/typescript/bin/tsc --lsp --stdio` with Zed's bundled Node.
+1. `lsp.typescript.settings.tsdk.path` / `tsdk.path` (explicit, version checked).
+2. Any dep (dependencies/devDependencies/peerDependencies) in worktree `package.json` whose version
+   specifier indicates 7+ (including aliases like "@typescript/native", "typescript-7", or
+   "typescript" aliased to TS7 via npm:). Uses the corresponding `node_modules/<key>/bin/tsc` and
+   verifies actual version >=7 from its package.json. (Skips 6.0 compat aliases.)
+3. Otherwise: managed `npm install typescript` (into the extension; version >=7 enforced) +
+   `node .../bin/tsc --lsp --stdio` (Zed node or `which("node")` from worktree).
 
 For managed installs, `version` wins over `updateChannel`:
 
