@@ -15,6 +15,7 @@ impl TypeScriptExtension {
 
         let installed = zed::npm_package_installed_version(TYPESCRIPT_PACKAGE)?;
         let latest = zed::npm_package_latest_version(TYPESCRIPT_PACKAGE)?;
+        ensure_typescript_7_or_newer(&latest)?;
 
         if installed.as_deref() != Some(latest.as_str()) {
             zed::set_language_server_installation_status(
@@ -74,6 +75,25 @@ impl zed::Extension for TypeScriptExtension {
 
 fn lsp_args() -> Vec<String> {
     vec!["--lsp".into(), "--stdio".into()]
+}
+
+fn ensure_typescript_7_or_newer(version: &str) -> Result<()> {
+    let major = version
+        .strip_prefix('v')
+        .unwrap_or(version)
+        .split('.')
+        .next()
+        .ok_or_else(|| format!("invalid TypeScript version `{version}`"))?
+        .parse::<u64>()
+        .map_err(|_| format!("invalid TypeScript version `{version}`"))?;
+
+    if major < 7 {
+        return Err(format!(
+            "TypeScript LSP requires TypeScript 7 or newer, got `{version}`"
+        ));
+    }
+
+    Ok(())
 }
 
 zed::register_extension!(TypeScriptExtension);
