@@ -1,25 +1,39 @@
 # TypeScript for Zed
 
-Zed extension that runs the TypeScript 7 language server.
+Zed extension that runs the [TypeScript 7] native language server.
 
 It attaches to Zed's existing JavaScript, JSX, TypeScript, and TSX languages.
 
-Further read: [Announcing TypeScript 7.0].
+[TypeScript 7]: https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/ "Announcing TypeScript 7.0"
 
-[Announcing TypeScript 7.0]: https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#editor-experience "Editor Experience"
+## How the server runs
 
-## Server Resolution
+TypeScript 7's language server is a native executable that ships inside the platform-specific
+`@typescript/typescript-<platform>-<arch>` npm packages, launched in LSP mode:
 
-The extension resolves the `tsc` bin (to run via node) preferring the project's own TypeScript 7+ if
-present:
+```sh
+tsc --lsp --stdio
+```
 
-1. `lsp.typescript.settings.tsdk.path` / `tsdk.path` (explicit, version checked).
-2. Any dep (dependencies/devDependencies/peerDependencies) in worktree `package.json` whose version
-   specifier indicates 7+ (including aliases like "@typescript/native", "typescript-7", or
-   "typescript" aliased to TS7 via npm:). Uses the corresponding `node_modules/<key>/bin/tsc` and
-   verifies actual version >=7 from its package.json. (Skips 6.0 compat aliases.)
-3. Otherwise: managed `npm install typescript` (into the extension; version >=7 enforced) +
-   `node .../bin/tsc --lsp --stdio` (Zed node or `which("node")` from worktree).
+The extension executes that native binary directly when it can locate it next to the resolved
+`typescript` package (npm/bun hoisted layouts, pnpm on Linux/macOS). Otherwise it falls back to the
+package's `bin/tsc` Node launcher — Microsoft's own resolution logic — via the worktree's `node`
+(volta/fnm shims included) or Zed's bundled Node. No Node process stays in the middle on the native
+path.
+
+## Server resolution
+
+The extension resolves the TypeScript 7+ package to run, preferring the project's own copy:
+
+1. `tsdk.path` (explicit, version checked). Accepts the package root, its `lib` dir (VS Code
+   `typescript.tsdk` convention), a `bin/tsc` path, or a platform package containing the native
+   binary.
+2. Any dep (dependencies/devDependencies/peerDependencies) in the worktree `package.json` whose
+   version specifier indicates 7+ (including aliases like `"@typescript/native"`, `"typescript-7"`,
+   or `"typescript"` aliased via `npm:`). Verifies the actual installed version is >=7. (Skips
+   `@typescript/typescript6` compat aliases.)
+3. Otherwise: managed `npm install typescript` into the extension's own directory (version >=7
+   enforced).
 
 For managed installs, `version` wins over `updateChannel`:
 
@@ -29,13 +43,165 @@ For managed installs, `version` wins over `updateChannel`:
 | `updateChannel: "latest"` | Install the latest stable `typescript` package.                     |
 | `updateChannel: "next"`   | Install `typescript@next`, matching TypeScript's nightly channel.   |
 
-The installed package must resolve to TypeScript 7 or newer.
+TypeScript 6 and older are rejected — for those, use Zed's built-in TypeScript support instead.
 
-The server is launched as:
+## Settings
 
-```sh
-tsc --lsp --stdio
+All configuration lives under `lsp.typescript` in Zed settings. The extension owns a small set of
+launch/install keys; **everything else in `settings` is forwarded verbatim to the language server**,
+which pulls it via `workspace/configuration`.
+
+### Extension-owned settings
+
+| Setting             | Meaning                                                                                                     |
+| ------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `version`           | npm version spec to install (wins over `updateChannel`).                                                    |
+| `updateChannel`     | `"latest"` or `"next"`.                                                                                     |
+| `tsdk.path`         | Explicit TypeScript package location (see Server resolution).                                               |
+| `server.pprofDir`   | Passes `--pprofDir` so the server writes pprof CPU/memory profiles there.                                   |
+| `server.goMemLimit` | Sets `GOMEMLIMIT` for the server. Integer bytes with optional `B`/`KiB`/`MiB`/`GiB`/`TiB` suffix, or `off`. |
+| `server.args`       | Extra CLI args appended to `--lsp --stdio` — forwards future server flags without an extension update.      |
+| `server.env`        | Extra environment variables for the server process (e.g. `GOGC`, debug vars).                               |
+
+Dotted (`"server.pprofDir": …`) and nested (`"server": {"pprofDir": …}`) forms are both accepted;
+the nested form wins when both are set.
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "settings": {
+        "updateChannel": "next",
+        "server": {
+          "pprofDir": "./.typescript-pprof",
+          "goMemLimit": "2048MiB",
+          "env": { "GOGC": "50" }
+        }
+      }
+    }
+  }
+}
 ```
+
+The current server flag surface in `--lsp` mode is `--stdio`, `--pipe <name>`, `--socket <addr>`,
+and `--pprofDir <dir>`; anything new lands via `server.args`.
+
+### Custom binary
+
+`lsp.typescript.binary` overrides how the server is launched entirely:
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "binary": {
+        // a path ending in tsc/tsc.js/tsc.exe is launched as the server itself;
+        // any other path is treated as a custom node to run the resolved tsc with
+        "path": "/path/to/tsc",
+        "arguments": ["--lsp", "--stdio"], // optional: full args override
+        "env": { "GOMEMLIMIT": "4GiB" } // optional: highest-precedence env
+      }
+    }
+  }
+}
+```
+
+Environment precedence, lowest to highest: shell environment, `server.env`, `server.goMemLimit`,
+`binary.env`.
+
+### Language server configuration (forwarded)
+
+The server requests the configuration sections `js/ts`, `typescript`, `javascript`, and `editor`,
+and merges them with ascending precedence `editor` → `javascript` → `typescript` → `js/ts`. Put
+those sections directly in `settings` — they are forwarded to the server:
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "settings": {
+        "typescript": {
+          "preferences": {
+            "quoteStyle": "single",
+            "importModuleSpecifier": "non-relative",
+            "preferTypeOnlyAutoImports": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Matching Zed's built-in TypeScript support, the extension enables all inlay hint kinds and both code
+lens kinds server-side by default (Zed's own `inlay_hints` setting still controls whether hints are
+displayed). Your settings deep-merge over these defaults and win at leaf level, so e.g.
+`"typescript": {"inlayHints": {"parameterNames": {"enabled": "none"}}}` turns one hint kind off
+while the rest keep their defaults.
+
+VS Code-style dotted keys are also accepted and expanded, so configuration copied from TypeScript
+docs works as-is (nested form wins on conflict):
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "settings": {
+        "typescript.inlayHints.parameterNames.enabled": "all",
+        "js/ts.implicitProjectConfig.checkJs": true
+      }
+    }
+  }
+}
+```
+
+Option groups the server reads (same names as the VS Code TypeScript settings, minus the
+`typescript.`/`javascript.` prefix): `inlayHints.*`, `preferences.*` (quote style, auto-imports,
+module specifiers, organize imports), `suggest.*`, `format.*`, `referencesCodeLens.*` /
+`implementationsCodeLens.*`, `validate.*`, `workspaceSymbols.*`, `autoClosingTags`, and
+`implicitProjectConfig.*` under `js/ts`. The authoritative list is [`UserPreferences`] in the server
+source.
+
+[`UserPreferences`]: https://github.com/microsoft/typescript-go/blob/main/internal/ls/lsutil/userpreferences.go
+
+### Initialization options (forwarded)
+
+`initialization_options` are passed to the server verbatim at `initialize`. Known upstream options
+([`InitializationOptions`], read in [`server.go`]):
+
+| Option                             | Upstream meaning                                                     |
+| ---------------------------------- | -------------------------------------------------------------------- |
+| `disablePushDiagnostics`           | Disable automatic diagnostic pushes.                                 |
+| `codeLensShowLocationsCommandName` | Client command used by resolved references/implementations CodeLens. |
+| `userPreferences`                  | Initial user preferences (same shape as the sections above).         |
+| `enableTelemetry`                  | Enable server telemetry events.                                      |
+| `logVerbosity`                     | Initial server log verbosity.                                        |
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "initialization_options": {
+        "enableTelemetry": false,
+        "logVerbosity": 2
+      }
+    }
+  }
+}
+```
+
+Preferences set via the configuration sections update live on `workspace/didChangeConfiguration`;
+`initialization_options` only apply at server startup.
+
+[`InitializationOptions`]: https://github.com/microsoft/typescript-go/blob/main/internal/lsp/lsproto/lsp_generated.go
+[`server.go`]: https://github.com/microsoft/typescript-go/blob/main/internal/lsp/server.go
+
+## Known limits
+
+- TypeScript 7 has no stable programmatic API yet, so embedded-language workflows (Vue, MDX, Astro,
+  Svelte, Angular templates) are not supported by the upstream server.
+- `codeLensShowLocationsCommandName` requires client-side command support that Zed extensions cannot
+  register; code lenses resolve, but the "show locations" command is editor-dependent.
 
 ## Dev Install
 
@@ -45,110 +211,5 @@ In Zed, run `zed: install dev extension` and select this directory.
 
 After edits, rebuild from the Extensions page.\
 For logs, run Zed with `zed --foreground` or use `zed: open log`.
-
-## Settings
-
-This extension does not provide a custom settings UI or schema.\
-It reads extension-owned keys from `lsp.typescript.settings` and removes them before forwarding the
-remaining settings to TypeScript.
-
-Use `initialization_options` for upstream TypeScript LSP initialization options.\
-The upstream type is [`InitializationOptions`], and Microsoft's VS Code extension sets
-`codeLensShowLocationsCommandName`, `enableTelemetry`, and `logVerbosity` during client startup in
-[`client.ts`]. The server reads these options during `initialize` in [`server.go`].
-
-Known upstream initialization options:
-
-| Option                             | Upstream meaning                                                     |
-| ---------------------------------- | -------------------------------------------------------------------- |
-| `disablePushDiagnostics`           | Disable automatic diagnostic pushes.                                 |
-| `codeLensShowLocationsCommandName` | Client command used by resolved references/implementations CodeLens. |
-| `userPreferences`                  | TypeScript user preferences and/or formatting options.               |
-| `enableTelemetry`                  | Enable server telemetry events.                                      |
-| `logVerbosity`                     | Initial server log verbosity.                                        |
-
-Example:
-
-```jsonc
-{
-  "lsp": {
-    "typescript": {
-      "initialization_options": {
-        "disablePushDiagnostics": false,
-        "enableTelemetry": false,
-        "logVerbosity": 3,
-        "userPreferences": {
-          "includeInlayParameterNameHints": "all"
-        }
-      }
-    }
-  }
-}
-```
-
-Use `settings` for this Zed extension's launch/install settings:
-
-VS Code-style dotted keys are accepted because TypeScript docs and ecosystem examples often use
-them:
-
-```jsonc
-{
-  "lsp": {
-    "typescript": {
-      "initialization_options": {},
-      "settings": {
-        "version": "7.0.2",
-        "tsdk.path": "./node_modules/typescript",
-        "server.pprofDir": "./.typescript-pprof",
-        "server.goMemLimit": "2048MiB"
-      }
-    }
-  }
-}
-```
-
-Nested settings are accepted too:
-
-```jsonc
-{
-  "lsp": {
-    "typescript": {
-      "settings": {
-        "updateChannel": "next",
-        "tsdk": {
-          "path": "./node_modules/typescript"
-        },
-        "server": {
-          "pprofDir": "./.typescript-pprof",
-          "goMemLimit": "2048MiB"
-        }
-      }
-    }
-  }
-}
-```
-
-If both forms are set for the same option, the nested setting wins. Example:
-
-```jsonc
-{
-  "lsp": {
-    "typescript": {
-      "settings": {
-        "server.pprofDir": "./ignored",
-        "server": {
-          "pprofDir": "./wins"
-        }
-      }
-    }
-  }
-}
-```
-
-Here `./wins` is used.
-
-[`InitializationOptions`]: https://github.com/microsoft/typescript-go/blob/main/internal/lsp/lsproto/lsp_generated.go#L8774-L8790
-[`client.ts`]: https://github.com/microsoft/typescript-go/blob/main/_extension/src/client.ts#L80-L87
-[`server.go`]: https://github.com/microsoft/typescript-go/blob/main/internal/lsp/server.go#L1028-L1040
 
 <!-- markdownlint-disable-file MD013 -->
