@@ -3,11 +3,35 @@ use zed_extension_api::{self as zed, LanguageServerId, Result, settings::LspSett
 const LANGUAGE_SERVER_ID: &str = "typescript";
 const TYPESCRIPT_PACKAGE: &str = "typescript";
 const TYPESCRIPT_BIN: &str = "node_modules/typescript/bin/tsc";
-const VERSION_SETTING: &str = "version";
-const UPDATE_CHANNEL_SETTING: &str = "updateChannel";
-const TSDK_PATH_SETTING: &str = "tsdk.path";
-const PPROF_DIR_SETTING: &str = "server.pprofDir";
-const GO_MEM_LIMIT_SETTING: &str = "server.goMemLimit";
+
+const EXTENSION_SETTINGS: [ExtensionSetting; 5] = [
+    ExtensionSetting::Version,
+    ExtensionSetting::UpdateChannel,
+    ExtensionSetting::TsdkPath,
+    ExtensionSetting::PprofDir,
+    ExtensionSetting::GoMemLimit,
+];
+
+#[derive(Clone, Copy)]
+enum ExtensionSetting {
+    Version,
+    UpdateChannel,
+    TsdkPath,
+    PprofDir,
+    GoMemLimit,
+}
+
+impl ExtensionSetting {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Version => "version",
+            Self::UpdateChannel => "updateChannel",
+            Self::TsdkPath => "tsdk.path",
+            Self::PprofDir => "server.pprofDir",
+            Self::GoMemLimit => "server.goMemLimit",
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UpdateChannel {
@@ -58,7 +82,7 @@ impl TypeScriptExtension {
         self.installed_channel = requested.update_channel;
         self.installed_spec = Some(install_spec);
 
-        Ok(TYPESCRIPT_BIN.into())
+        extension_file_path(TYPESCRIPT_BIN)
     }
 
     fn build_language_server_command(
@@ -67,11 +91,12 @@ impl TypeScriptExtension {
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
         let settings = lsp_settings(worktree);
-        let package_bin = if let Some(tsdk_path) = string_setting(&settings, TSDK_PATH_SETTING) {
-            tsdk_bin_path(worktree, tsdk_path)
-        } else {
-            self.install_typescript(language_server_id, worktree)?
-        };
+        let package_bin =
+            if let Some(tsdk_path) = string_setting(&settings, ExtensionSetting::TsdkPath) {
+                tsdk_bin_path(worktree, tsdk_path)
+            } else {
+                self.install_typescript(language_server_id, worktree)?
+            };
 
         Ok(zed::Command {
             command: zed::node_binary_path()?,
@@ -147,7 +172,7 @@ fn lsp_settings(worktree: &zed::Worktree) -> Option<zed::serde_json::Value> {
 fn lsp_args(settings: &Option<zed::serde_json::Value>) -> Vec<String> {
     let mut args = vec!["--lsp".into(), "--stdio".into()];
 
-    if let Some(pprof_dir) = string_setting(settings, PPROF_DIR_SETTING) {
+    if let Some(pprof_dir) = string_setting(settings, ExtensionSetting::PprofDir) {
         args.push("--pprofDir".into());
         args.push(pprof_dir.into());
     }
@@ -172,7 +197,7 @@ impl RequestedTypescriptSpec {
 fn requested_typescript_spec(worktree: &zed::Worktree) -> Result<RequestedTypescriptSpec> {
     let settings = lsp_settings(worktree);
 
-    if let Some(version) = string_setting(&settings, VERSION_SETTING) {
+    if let Some(version) = string_setting(&settings, ExtensionSetting::Version) {
         ensure_non_empty_version(version)?;
         return Ok(RequestedTypescriptSpec {
             install_spec: version.into(),
@@ -181,7 +206,7 @@ fn requested_typescript_spec(worktree: &zed::Worktree) -> Result<RequestedTypesc
         });
     }
 
-    let Some(channel) = string_setting(&settings, UPDATE_CHANNEL_SETTING) else {
+    let Some(channel) = string_setting(&settings, ExtensionSetting::UpdateChannel) else {
         let latest = zed::npm_package_latest_version(TYPESCRIPT_PACKAGE)?;
         ensure_typescript_7_or_newer(&latest)?;
         return Ok(RequestedTypescriptSpec {
@@ -228,13 +253,21 @@ fn tsdk_bin_path(worktree: &zed::Worktree, tsdk_path: &str) -> String {
     }
 }
 
+fn extension_file_path(path: &str) -> Result<String> {
+    let path = std::env::current_dir()
+        .map_err(|error| format!("failed to read extension directory: {error}"))?
+        .join(path);
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
 fn server_env(
     worktree: &zed::Worktree,
     settings: &Option<zed::serde_json::Value>,
 ) -> Result<Vec<(String, String)>> {
     let mut env = worktree.shell_env();
 
-    if let Some(go_mem_limit) = string_setting(settings, GO_MEM_LIMIT_SETTING) {
+    if let Some(go_mem_limit) = string_setting(settings, ExtensionSetting::GoMemLimit) {
         ensure_go_mem_limit(go_mem_limit)?;
         env.push(("GOMEMLIMIT".into(), go_mem_limit.into()));
     }
@@ -242,11 +275,12 @@ fn server_env(
     Ok(env)
 }
 
-fn string_setting<'a>(
-    settings: &'a Option<zed::serde_json::Value>,
-    dotted_path: &str,
-) -> Option<&'a str> {
+fn string_setting(
+    settings: &Option<zed::serde_json::Value>,
+    setting: ExtensionSetting,
+) -> Option<&str> {
     let settings = settings.as_ref()?.as_object()?;
+    let dotted_path = setting.path();
 
     let mut parts = dotted_path.split('.');
     let first = parts.next()?;
@@ -270,11 +304,9 @@ fn strip_extension_settings(
 
     match settings {
         zed::serde_json::Value::Object(mut object) => {
-            object.remove(VERSION_SETTING);
-            object.remove(UPDATE_CHANNEL_SETTING);
-            remove_setting(&mut object, TSDK_PATH_SETTING);
-            remove_setting(&mut object, PPROF_DIR_SETTING);
-            remove_setting(&mut object, GO_MEM_LIMIT_SETTING);
+            for setting in EXTENSION_SETTINGS {
+                remove_setting(&mut object, setting);
+            }
             if object.is_empty() {
                 None
             } else {
@@ -310,7 +342,11 @@ fn exact_version(version: &str) -> Option<String> {
     }
 }
 
-fn remove_setting(object: &mut zed::serde_json::Map<String, zed::serde_json::Value>, path: &str) {
+fn remove_setting(
+    object: &mut zed::serde_json::Map<String, zed::serde_json::Value>,
+    setting: ExtensionSetting,
+) {
+    let path = setting.path();
     object.remove(path);
 
     let mut parts = path.split('.');
