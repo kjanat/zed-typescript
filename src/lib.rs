@@ -7,30 +7,6 @@ const TYPESCRIPT_BIN: &str = "node_modules/typescript/bin/tsc";
 struct TypeScriptExtension;
 
 impl TypeScriptExtension {
-    fn command_from_settings(worktree: &zed::Worktree) -> Option<zed::Command> {
-        let settings = LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree).ok()?;
-        let binary = settings.binary?;
-        let path = binary.path?;
-        let mut args = binary.arguments.unwrap_or_default();
-        if args.is_empty() {
-            args = lsp_args();
-        }
-
-        Some(zed::Command {
-            command: path,
-            args,
-            env: worktree.shell_env(),
-        })
-    }
-
-    fn command_from_preview_path(worktree: &zed::Worktree) -> Option<zed::Command> {
-        worktree.which("tsgo").map(|command| zed::Command {
-            command,
-            args: lsp_args(),
-            env: worktree.shell_env(),
-        })
-    }
-
     fn install_typescript(language_server_id: &LanguageServerId) -> Result<String> {
         zed::set_language_server_installation_status(
             language_server_id,
@@ -67,14 +43,6 @@ impl zed::Extension for TypeScriptExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        if let Some(command) = Self::command_from_settings(worktree) {
-            return Ok(command);
-        }
-
-        if let Some(command) = Self::command_from_preview_path(worktree) {
-            return Ok(command);
-        }
-
         let package_bin = Self::install_typescript(language_server_id)?;
         Ok(zed::Command {
             command: zed::node_binary_path()?,
