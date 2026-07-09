@@ -296,12 +296,15 @@ fn requested_typescript_spec(worktree: &zed::Worktree) -> Result<RequestedTypesc
 
 fn tsdk_bin_path(worktree: &zed::Worktree, tsdk_path: &str) -> String {
     let trimmed = tsdk_path.trim().trim_end_matches(['/', '\\']).to_string();
-    let root = worktree.root_path();
-    let root_trim = root.trim_end_matches(['/', '\\']);
+    let root = worktree
+        .root_path()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
     let base = if trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.contains(':') {
         trimmed.clone()
     } else {
-        format!("{}/{}", root_trim, trimmed)
+        format!("{}/{}", root, trimmed)
     };
 
     let norm = base.replace('\\', "/");
@@ -321,7 +324,7 @@ fn extension_file_path(path: &str) -> Result<String> {
         .map_err(|error| format!("failed to read extension directory: {error}"))?
         .join(path);
 
-    Ok(path.to_string_lossy().into_owned())
+    Ok(path.to_string_lossy().into_owned().replace('\\', "/"))
 }
 
 fn server_env(
@@ -522,7 +525,11 @@ fn find_local_typescript_bin(worktree: &zed::Worktree) -> Option<String> {
             return None;
         }
 
-        let root = worktree.root_path();
+        let root = worktree
+            .root_path()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
         for name in possible_names {
             let bin = format!("{}/node_modules/{}/bin/tsc", root, name);
             if std::fs::metadata(&bin).is_ok_and(|m| m.is_file()) {

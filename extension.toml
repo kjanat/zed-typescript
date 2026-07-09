@@ -1,3 +1,5 @@
+#:tombi schema.strict = false
+
 id             = "typescript"
 name           = "TypeScript"
 version        = "0.0.1"
@@ -7,6 +9,7 @@ description    = "Runs the TypeScript 7+ language server in Zed."
 repository     = "https://github.com/kjanat/zed-typescript"
 
 [language_servers.typescript]
+name      = "TypeScript"
 languages = ["JavaScript", "JSX", "TypeScript", "TSX"]
 
 [language_servers.typescript.language_ids]
