@@ -5,7 +5,7 @@
   "useTabs": true,
   "jsonSchemaSort": { "associations": ["**/schema.json", "**/*.schema.json"] },
   "json": { "trailingCommas": "maintain", "useTabs": false },
-  "markdown": { "textWrap": "always", "emphasisKind": "asterisks", "lineWidth": 80 },
+  "markdown": { "textWrap": "always", "emphasisKind": "asterisks", "lineWidth": 100 },
   "markup": { "associations": ["!**/*.svg"] },
   "yaml": { "printWidth": 160 },
   "exec": {

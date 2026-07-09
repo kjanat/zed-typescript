@@ -2,25 +2,26 @@
 
 Zed extension that runs the TypeScript 7 language server.
 
-It attaches to Zed's existing JavaScript, JSX, TypeScript, and TSX languages. It
-does not register or replace grammars.
+It attaches to Zed's existing JavaScript, JSX, TypeScript, and TSX languages.
 
-Source:
-[Announcing TypeScript 7.0](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/).
+Further read: [Announcing TypeScript 7.0].
 
-The announcement says TypeScript 7 is installed from the `typescript` npm
-package, provides the new `tsc` executable, and adds Language Server Protocol
-support for editors.
+[Announcing TypeScript 7.0]: https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/
 
 ## Server Resolution
 
 The extension resolves the server in this order:
 
-1. Resolves the latest `typescript` package and requires major version 7 or
-   newer.
+1. Reads `lsp.typescript.settings.updateChannel`, defaulting to `latest`.
 2. Installs `typescript` with Zed's npm helper.
-3. Runs `node node_modules/typescript/bin/tsc --lsp --stdio` with Zed's bundled
-   Node.
+3. Runs `node node_modules/typescript/bin/tsc --lsp --stdio` with Zed's bundled Node.
+
+Supported update channels:
+
+| Value    | Install behavior                                                  |
+| -------- | ----------------------------------------------------------------- |
+| `latest` | Install the latest stable `typescript` package.                   |
+| `next`   | Install `typescript@next`, matching TypeScript's nightly channel. |
 
 The server is launched as:
 
@@ -34,20 +35,23 @@ Prerequisite: Rust installed with `rustup`.
 
 In Zed, run `zed: install dev extension` and select this directory.
 
-After edits, rebuild from the Extensions page. For logs, run Zed with
-`zed --foreground` or use `zed: open log`.
+After edits, rebuild from the Extensions page.\
+For logs, run Zed with `zed --foreground` or use `zed: open log`.
 
 ## Settings
 
-This extension does not provide a custom settings UI or schema. It forwards raw
-Zed LSP settings to the server:
+This extension does not provide a custom settings UI or schema.\
+It reads `updateChannel` from `lsp.typescript.settings` for extension install behavior and removes
+that key before forwarding the remaining settings to TypeScript.
 
-```json
+```jsonc
 {
   "lsp": {
     "typescript": {
       "initialization_options": {},
-      "settings": {}
+      "settings": {
+        "updateChannel": "next" // optional, defaults to "latest"
+      }
     }
   }
 }

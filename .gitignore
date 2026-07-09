@@ -1,2 +1,3 @@
 extension.wasm
 target/
+Cargo.lock
