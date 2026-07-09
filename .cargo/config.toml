@@ -1,0 +1,5 @@
+# Cargo configuration for the svg-language-server workspace.
+# See: https://doc.rust-lang.org/cargo/reference/config.html
+# Schema configured in ../tombi.toml
+
+alias.lint = "clippy --workspace --all-targets --all-features -- -D warnings -D clippy::all"

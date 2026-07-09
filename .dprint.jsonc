@@ -10,7 +10,7 @@
   "yaml": { "printWidth": 160 },
   "exec": {
     "cwd": "${configDir}",
-    "cacheKey": "2",
+    "cacheKey": "1",
     "timeout": 30,
     "commands": [
       {
@@ -18,7 +18,7 @@
         "exts": ["toml"],
         "cacheKeyFiles": ["tombi.toml"]
       },
-      { "command": "rustfmt", "exts": ["rs"], "cacheKeyFiles": ["rustfmt.toml"] },
+      { "command": "rustfmt", "exts": ["rs"], "cacheKeyFiles": ["rustfmt.toml", ".cargo/config.toml"] },
     ]
   },
   "excludes": ["**/*.lock", "**/fixtures", "**/node_modules", "**/target"],
