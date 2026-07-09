@@ -1,4 +1,4 @@
-use zed_extension_api::{self as zed, LanguageServerId, Result, process, settings::LspSettings};
+use zed_extension_api::{self as zed, LanguageServerId, Result, settings::LspSettings};
 
 const LANGUAGE_SERVER_ID: &str = "typescript";
 const TYPESCRIPT_PACKAGE: &str = "typescript";
@@ -55,7 +55,6 @@ impl TypeScriptExtension {
             "TypeScript was not installed after npm install completed".to_string()
         })?;
         ensure_typescript_7_or_newer(installed)?;
-        ensure_tsc_binary_supports_lsp(TYPESCRIPT_BIN, worktree)?;
         self.installed_channel = requested.update_channel;
         self.installed_spec = Some(install_spec);
 
@@ -69,9 +68,7 @@ impl TypeScriptExtension {
     ) -> Result<zed::Command> {
         let settings = lsp_settings(worktree);
         let package_bin = if let Some(tsdk_path) = string_setting(&settings, TSDK_PATH_SETTING) {
-            let tsdk_bin = tsdk_bin_path(worktree, tsdk_path);
-            ensure_tsc_binary_supports_lsp(&tsdk_bin, worktree)?;
-            tsdk_bin
+            tsdk_bin_path(worktree, tsdk_path)
         } else {
             self.install_typescript(language_server_id, worktree)?
         };
@@ -229,40 +226,6 @@ fn tsdk_bin_path(worktree: &zed::Worktree, tsdk_path: &str) -> String {
     } else {
         format!("{}/bin/tsc", path)
     }
-}
-
-fn ensure_tsc_binary_supports_lsp(tsc_path: &str, worktree: &zed::Worktree) -> Result<()> {
-    let mut command = process::Command::new(zed::node_binary_path()?)
-        .arg(tsc_path)
-        .arg("--version")
-        .envs(worktree.shell_env());
-    let output = command.output()?;
-    if output.status != Some(0) {
-        return Err(format!(
-            "failed to run `{tsc_path} --version`: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let version_output = String::from_utf8_lossy(&output.stdout);
-    let _version = version_output
-        .split_whitespace()
-        .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .ok_or_else(|| format!("could not read TypeScript version from `{version_output}`"))?;
-
-    let mut command = process::Command::new(zed::node_binary_path()?)
-        .arg(tsc_path)
-        .arg("--lsp")
-        .envs(worktree.shell_env());
-    let output = command.output()?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status == Some(1) && stderr.contains("only stdio is supported") {
-        return Ok(());
-    }
-
-    Err(format!(
-        "TypeScript executable `{tsc_path}` does not appear to support `--lsp`: {stderr}"
-    ))
 }
 
 fn server_env(

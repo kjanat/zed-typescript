@@ -22,5 +22,5 @@ package = "typescript"
 
 [[capabilities]]
 kind    = "process:exec"
-command = "node"
+command = "*"
 args    = ["**"]
