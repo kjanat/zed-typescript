@@ -57,7 +57,7 @@ which pulls it via `workspace/configuration`.
 | ------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `version`           | npm version spec to install (wins over `updateChannel`).                                                    |
 | `updateChannel`     | `"latest"` or `"next"`.                                                                                     |
-| `tsdk.path`         | Explicit TypeScript package location (see Server resolution).                                               |
+| `tsdk.path`         | Explicit TypeScript package location (see [Server resolution](#server-resolution)).                         |
 | `server.pprofDir`   | Passes `--pprofDir` so the server writes pprof CPU/memory profiles there.                                   |
 | `server.goMemLimit` | Sets `GOMEMLIMIT` for the server. Integer bytes with optional `B`/`KiB`/`MiB`/`GiB`/`TiB` suffix, or `off`. |
 | `server.args`       | Extra CLI args appended to `--lsp --stdio` — forwards future server flags without an extension update.      |
@@ -162,12 +162,12 @@ module specifiers, organize imports), `suggest.*`, `format.*`, `referencesCodeLe
 `implicitProjectConfig.*` under `js/ts`. The authoritative list is [`UserPreferences`] in the server
 source.
 
-[`UserPreferences`]: https://github.com/microsoft/typescript-go/blob/main/internal/ls/lsutil/userpreferences.go
+[`UserPreferences`]: https://github.com/microsoft/typescript-go/blob/168e7015edf98244febc8f4ae450b673b5d195d7/internal/ls/lsutil/userpreferences.go#L37-L193
 
 ### Initialization options (forwarded)
 
-`initialization_options` are passed to the server verbatim at `initialize`. Known upstream options
-([`InitializationOptions`], read in [`server.go`]):
+`initialization_options` are passed to the server verbatim at `initialize`.\
+Known upstream options ([`InitializationOptions`], read in [`server.go`]):
 
 | Option                             | Upstream meaning                                                     |
 | ---------------------------------- | -------------------------------------------------------------------- |
@@ -193,7 +193,7 @@ source.
 Preferences set via the configuration sections update live on `workspace/didChangeConfiguration`;
 `initialization_options` only apply at server startup.
 
-[`InitializationOptions`]: https://github.com/microsoft/typescript-go/blob/main/internal/lsp/lsproto/lsp_generated.go
+[`InitializationOptions`]: https://github.com/microsoft/typescript-go/blob/168e7015edf98244febc8f4ae450b673b5d195d7/internal/lsp/lsproto/lsp_generated.go#L8774-L8790
 [`server.go`]: https://github.com/microsoft/typescript-go/blob/main/internal/lsp/server.go
 
 ## Known limits
