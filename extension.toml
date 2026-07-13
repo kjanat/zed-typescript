@@ -21,8 +21,3 @@ languages = ["JavaScript", "JSX", "TypeScript", "TSX"]
 [[capabilities]]
 kind    = "npm:install"
 package = "typescript"
-
-[[capabilities]]
-kind    = "process:exec"
-command = "node"
-args    = ["**"]
