@@ -29,9 +29,10 @@ The extension resolves the TypeScript 7+ package to run, preferring the project'
    `typescript.tsdk` convention), a `bin/tsc` path, or a platform package containing the native
    binary.
 2. Any dep (dependencies/devDependencies/peerDependencies) in the worktree `package.json` whose
-   version specifier indicates 7+ (including aliases like `"@typescript/native"`, `"typescript-7"`,
-   or `"typescript"` aliased via `npm:`). Verifies the actual installed version is >=7. (Skips
-   `@typescript/typescript6` compat aliases.)
+   effective package name is `typescript`: either a direct `"typescript"` dependency or an `npm:`
+   alias under any key (such as `"@typescript/native": "npm:typescript@^7"`). Verifies that the
+   installed package is >=7 and has a usable launcher. (Skips `@typescript/typescript6` compat
+   aliases.)
 3. Otherwise: managed `npm install typescript` into the extension's own directory (version >=7
    enforced).
 

@@ -131,62 +131,68 @@ pub fn tsdk_package_dir(worktree: &zed::Worktree, tsdk_path: &str) -> String {
     norm
 }
 
-/// Finds a project-local TypeScript 7+ package by scanning `package.json`
-/// dependency sections for anything that looks like a TypeScript 7 dependency
-/// (including npm aliases such as `"typescript-7"` or `npm:typescript@7`).
+/// Finds a usable project-local TypeScript 7+ package by scanning `package.json`
+/// dependency sections. npm aliases may use any dependency key, but their
+/// target package must be `typescript`.
 pub fn find_local_typescript_package_dir(worktree: &zed::Worktree) -> Option<String> {
     let content = worktree.read_text_file("package.json").ok()?;
     let pkg: zed::serde_json::Value = zed::serde_json::from_str(&content).ok()?;
-
-    let specifier_may_be_7 = |spec: &str| -> bool {
-        let mut s = spec.trim().to_lowercase();
-        // strip npm alias prefix like "npm:..." to get to the version part
-        if let Some(pos) = s.find("npm:") {
-            s = s[pos + 4..].to_string();
-        }
-        if s.contains("typescript6") || s.contains("/typescript6") {
-            return false; // explicit 6 compat
-        }
-        // take part after last @ for the version specifier
-        if let Some(at) = s.rfind('@') {
-            s = s[at + 1..].to_string();
-        }
-        s == "*"
-            || s == "latest"
-            || s == "next"
-            || s.starts_with("7")
-            || s.starts_with("^7")
-            || s.starts_with("~7")
-            || s.starts_with(">=7")
-            || s.contains("7.")
-    };
-
-    let mut possible_names = vec![];
-    for section in ["dependencies", "devDependencies", "peerDependencies"] {
-        if let Some(o) = pkg.get(section).and_then(|d| d.as_object()) {
-            for (key, val) in o {
-                if let Some(v) = val.as_str()
-                    && specifier_may_be_7(v)
-                {
-                    possible_names.push(key.clone());
-                }
-            }
-        }
-    }
 
     let root = worktree
         .root_path()
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_string();
-    for name in possible_names {
-        let dir = format!("{root}/node_modules/{name}");
-        if std::fs::metadata(format!("{dir}/package.json")).is_ok_and(|m| m.is_file()) {
-            return Some(dir);
+
+    find_typescript_dependency(&pkg, &root)
+}
+
+fn find_typescript_dependency(pkg: &zed::serde_json::Value, root: &str) -> Option<String> {
+    for section in ["dependencies", "devDependencies", "peerDependencies"] {
+        let Some(dependencies) = pkg.get(section).and_then(|value| value.as_object()) else {
+            continue;
+        };
+
+        for (key, value) in dependencies {
+            let Some(spec) = value.as_str() else {
+                continue;
+            };
+            if dependency_package_name(key, spec) != Some(TYPESCRIPT_PACKAGE) {
+                continue;
+            }
+
+            let dir = format!("{root}/node_modules/{key}");
+            let Ok(version) = typescript_version_from_package_dir(&dir) else {
+                continue;
+            };
+            if ensure_typescript_7_or_newer(&version).is_ok()
+                && has_usable_typescript_launcher(&dir)
+            {
+                return Some(dir);
+            }
         }
     }
 
     None
+}
+
+fn dependency_package_name<'a>(key: &'a str, spec: &'a str) -> Option<&'a str> {
+    let spec = spec.trim();
+    let Some(alias) = spec.strip_prefix("npm:") else {
+        return Some(key);
+    };
+
+    let version_separator = if let Some(scoped_alias) = alias.strip_prefix('@') {
+        scoped_alias.rfind('@').map(|position| position + 1)
+    } else {
+        alias.rfind('@')
+    };
+    let package_name = version_separator.map_or(alias, |position| &alias[..position]);
+    (!package_name.is_empty()).then_some(package_name)
+}
+
+fn has_usable_typescript_launcher(package_dir: &str) -> bool {
+    node_shim_path(package_dir).is_ok() || find_native_server_binary(package_dir).is_some()
 }
 
 pub fn typescript_version_from_package_dir(package_dir: &str) -> Result<String> {
@@ -285,6 +291,139 @@ fn exact_version(version: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    struct TestProject {
+        root: PathBuf,
+    }
+
+    impl TestProject {
+        fn new(name: &str) -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+            let root = std::env::temp_dir().join(format!(
+                "typescript-zed-{name}-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&root).expect("create test project directory");
+            Self { root }
+        }
+
+        fn add_package(&self, key: &str, version: &str, has_launcher: bool) -> String {
+            let package_dir = self.root.join("node_modules").join(key);
+            std::fs::create_dir_all(&package_dir).expect("create test package directory");
+            std::fs::write(
+                package_dir.join("package.json"),
+                format!(r#"{{"version":"{version}"}}"#),
+            )
+            .expect("write test package.json");
+
+            if has_launcher {
+                let bin_dir = package_dir.join("bin");
+                std::fs::create_dir_all(&bin_dir).expect("create test package bin directory");
+                std::fs::write(bin_dir.join("tsc"), "").expect("write test tsc launcher");
+            }
+
+            package_dir
+                .to_string_lossy()
+                .into_owned()
+                .replace('\\', "/")
+        }
+
+        fn root(&self) -> String {
+            self.root.to_string_lossy().into_owned().replace('\\', "/")
+        }
+    }
+
+    impl Drop for TestProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn test_dependency_package_name() {
+        let cases = [
+            (("typescript", "^7.0.2"), Some("typescript")),
+            (("typescript", "^8.0.0"), Some("typescript")),
+            (
+                ("@typescript/native", "npm:typescript@^7.0.2"),
+                Some("typescript"),
+            ),
+            (("whatever", " npm:typescript@next "), Some("typescript")),
+            (("foo", "^7.2.0"), Some("foo")),
+            (("foo", "npm:bar@7.0.0"), Some("bar")),
+            (
+                ("typescript", "npm:@typescript/typescript6@^6.0.2"),
+                Some("@typescript/typescript6"),
+            ),
+            (("foo", "npm:@scope/package@next"), Some("@scope/package")),
+            (("foo", "npm:@scope/package"), Some("@scope/package")),
+            (("foo", "npm:"), None),
+        ];
+
+        for ((key, spec), expected) in cases {
+            assert_eq!(dependency_package_name(key, spec), expected);
+        }
+    }
+
+    #[test]
+    fn test_find_dependency_ignores_unrelated_7_and_accepts_typescript_8() {
+        let project = TestProject::new("package-identity");
+        project.add_package("foo", "7.2.0", true);
+        let typescript_dir = project.add_package("typescript", "8.0.0", true);
+        let manifest = zed::serde_json::json!({
+            "dependencies": {
+                "foo": "^7.2.0",
+                "typescript": "^8.0.0"
+            }
+        });
+
+        assert_eq!(
+            find_typescript_dependency(&manifest, &project.root()),
+            Some(typescript_dir)
+        );
+    }
+
+    #[test]
+    fn test_find_dependency_supports_side_by_side_aliases() {
+        let project = TestProject::new("side-by-side-aliases");
+        let native_dir = project.add_package("@typescript/native", "7.0.2", true);
+        project.add_package("typescript", "6.0.2", true);
+        let manifest = zed::serde_json::json!({
+            "devDependencies": {
+                "@typescript/native": "npm:typescript@^7.0.2",
+                "typescript": "npm:@typescript/typescript6@^6.0.2"
+            }
+        });
+
+        assert_eq!(
+            find_typescript_dependency(&manifest, &project.root()),
+            Some(native_dir)
+        );
+    }
+
+    #[test]
+    fn test_find_dependency_continues_after_outdated_alias() {
+        let project = TestProject::new("continue-after-outdated");
+        project.add_package("a-typescript", "6.0.2", true);
+        let usable_dir = project.add_package("z-typescript", "7.0.2", true);
+        let manifest = zed::serde_json::json!({
+            "dependencies": {
+                "a-typescript": "npm:typescript@6.0.2",
+                "z-typescript": "npm:typescript@7.0.2"
+            }
+        });
+
+        assert_eq!(
+            find_typescript_dependency(&manifest, &project.root()),
+            Some(usable_dir)
+        );
+    }
 
     #[test]
     fn test_ensure_7_or_newer() {

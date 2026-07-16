@@ -27,13 +27,10 @@ impl TypeScriptExtension {
             return Ok(dir);
         }
 
-        if let Some(dir) = typescript_package::find_local_typescript_package_dir(worktree)
-            && let Ok(version) = typescript_package::typescript_version_from_package_dir(&dir)
-            && typescript_package::ensure_typescript_7_or_newer(&version).is_ok()
-        {
+        if let Some(dir) = typescript_package::find_local_typescript_package_dir(worktree) {
             return Ok(dir);
         }
-        // local dep was not 7+ (or not found), fall back to managed install for 7+
+        // no usable local TypeScript 7+ dep, fall back to a managed install
 
         self.install_managed(language_server_id, ext_settings)
     }
