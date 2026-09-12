@@ -1,0 +1,11 @@
+disallowed-types = [
+  { path = "std::process::Command", reason = "Gebruik zed::process::Command voor hostprocessen." },
+  { path = "std::net::TcpStream", reason = "Gebruik de netwerk-API van Zed." },
+]
+
+disallowed-methods = [
+  { path = "zed_extension_api::current_platform", reason = "Gebruik de Node-hostdetectie; deze Zed-API faalt op FreeBSD." },
+  { path = "std::env::var", reason = "De WASM-omgeving is niet de worktree-omgeving." },
+  { path = "std::env::vars", reason = "Gebruik worktree.shell_env()." },
+  { path = "std::thread::spawn", reason = "Geen native threads in de extensie." },
+]

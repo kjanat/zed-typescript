@@ -323,4 +323,15 @@ fn upsert_env(env: &mut Vec<(String, String)>, key: String, value: String) {
     env.push((key, value));
 }
 
-zed::register_extension!(TypeScriptExtension);
+// Zed reads its host-provided PWD to initialize WASI's working directory.
+// Keep this SDK exception confined to the generated registration code.
+#[cfg_attr(
+    target_os = "wasi",
+    expect(
+        clippy::disallowed_methods,
+        reason = "Zed's registration macro reads PWD to initialize the WASI work directory"
+    )
+)]
+mod registration {
+    zed_extension_api::register_extension!(super::TypeScriptExtension);
+}
