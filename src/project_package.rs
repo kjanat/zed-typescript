@@ -57,14 +57,24 @@ pub fn resolve(worktree: &zed::Worktree, tsdk: Option<&str>) -> Result<Discovery
         .output()
         .map_err(|_| "Could not run the TypeScript package resolver; check the extension's process:exec permission".to_string())?;
     if output.status != Some(0) {
-        return Err(match tsdk {
-            Some(path) => format!(
-                "tsdk.path `{path}` could not be resolved to a usable TypeScript 7+ package"
-            ),
-            None => "TypeScript project package resolution failed".into(),
-        });
+        return Err(resolver_error(&output.stdout, tsdk));
     }
     decode(&output.stdout)
+}
+
+fn resolver_error(stdout: &[u8], tsdk: Option<&str>) -> String {
+    if let Ok(value) = zed::serde_json::from_slice::<zed::serde_json::Value>(stdout)
+        && let Some(message) = value.get("error").and_then(|value| value.as_str())
+        && !message.trim().is_empty()
+    {
+        return message.to_string();
+    }
+    match tsdk {
+        Some(path) => {
+            format!("tsdk.path `{path}` could not be resolved to a usable TypeScript 7+ package")
+        }
+        None => "TypeScript project package resolution failed".into(),
+    }
 }
 
 fn decode(stdout: &[u8]) -> Result<Discovery> {
@@ -112,6 +122,31 @@ fn decode_package(value: &zed::serde_json::Value) -> Result<Option<ResolvedPacka
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolver_errors_preserve_details_and_handle_missing_output() {
+        let message = "tsdk.path must point to an installed TypeScript 7+ package with a launcher for this platform";
+        let stdout = zed::serde_json::to_vec(&zed::serde_json::json!({"error": message})).unwrap();
+        assert_eq!(resolver_error(&stdout, Some("missing")), message);
+        for invalid in [
+            "",
+            "not json",
+            "null",
+            "{}",
+            r#"{"error":null}"#,
+            r#"{"error":42}"#,
+            r#"{"error":"  "}"#,
+        ] {
+            assert_eq!(
+                resolver_error(invalid.as_bytes(), Some("missing")),
+                "tsdk.path `missing` could not be resolved to a usable TypeScript 7+ package"
+            );
+            assert_eq!(
+                resolver_error(invalid.as_bytes(), None),
+                "TypeScript project package resolution failed"
+            );
+        }
+    }
 
     #[test]
     fn decode_distinguishes_missing_packages_from_invalid_responses() {

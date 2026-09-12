@@ -232,3 +232,78 @@ test('opening a monorepo root does not select an arbitrary child workspace versi
 	pkg(child);
 	assert.equal(resolveTypescript(root), null);
 });
+
+test('canonical TypeScript wins within a section, with sorted aliases as fallback', t => {
+	const root = project(t);
+	json(root, { devDependencies: { 'z-ts': 'npm:typescript@^7', 'a-ts': 'npm:typescript@^7', typescript: '^7' } });
+	pkg(root, 'z-ts');
+	const alias = pkg(root, 'a-ts');
+	const canonical = pkg(root);
+	assert.equal(resolveTypescript(root).packageDirectory, canonical);
+	// Invalid metadata, old versions, missing launchers and absent packages must
+	// still allow a usable alias to win.
+	for (const metadata of [{ name: 'other', version: '7.0.2' }, { name: 'typescript', version: '6.0.2' }]) {
+		json(canonical, metadata);
+		assert.equal(resolveTypescript(root).packageDirectory, alias);
+	}
+	json(canonical, { name: 'typescript', version: '7.0.2' });
+	fs.rmSync(path.join(canonical, 'bin'), { recursive: true });
+	assert.equal(resolveTypescript(root).packageDirectory, alias);
+	fs.rmSync(canonical, { recursive: true });
+	assert.equal(resolveTypescript(root).packageDirectory, alias);
+});
+
+test('dependency section precedence is preserved when preferring the canonical key', t => {
+	const root = project(t);
+	json(root, { dependencies: { alias: 'npm:typescript@^7' }, devDependencies: { typescript: '^7' } });
+	const alias = pkg(root, 'alias');
+	pkg(root);
+	assert.equal(resolveTypescript(root).packageDirectory, alias);
+});
+
+test('host probe reports the specific invalid tsdk error', t => {
+	const root = project(t);
+	const output = spawnSync(process.execPath, [
+		'--input-type=commonjs',
+		'--eval',
+		fs.readFileSync(path.join(__dirname, '../src/resolve_typescript.cjs'), 'utf8'),
+		'--',
+		'--zed-typescript-resolve',
+		root,
+		'missing',
+	], { encoding: 'utf8' });
+	assert.equal(output.status, 1);
+	assert.deepEqual(JSON.parse(output.stdout), {
+		error: 'tsdk.path must point to an installed TypeScript 7+ package with a launcher for this platform',
+	});
+	assert.equal(output.stderr, '');
+});
+
+test('unexpected probe errors do not expose arbitrary error details', () => {
+	let stdout = '';
+	const hostProcess = {
+		platform: process.platform,
+		arch: process.arch,
+		argv: ['node', '--zed-typescript-resolve', '/project', ''],
+		stdout: {
+			write: text => {
+				stdout += text;
+			},
+		},
+		exitCode: 0,
+	};
+	vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/resolve_typescript.cjs'), 'utf8'), {
+		require: name =>
+			name === 'node:path'
+				? {
+					resolve() {
+						throw new Error('private error details');
+					},
+				}
+				: require(name),
+		module: { exports: {} },
+		process: hostProcess,
+	});
+	assert.equal(hostProcess.exitCode, 1);
+	assert.deepEqual(JSON.parse(stdout), { error: 'Could not resolve a usable TypeScript 7+ package' });
+});

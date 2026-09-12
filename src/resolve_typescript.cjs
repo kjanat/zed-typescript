@@ -5,6 +5,8 @@ const path = require('node:path');
 const platformPackage = `@typescript/typescript-${process.platform}-${process.arch}`;
 const executable = process.platform === 'win32' ? 'tsc.exe' : 'tsc';
 
+class ResolutionError extends Error {}
+
 function readJson(filename) {
 	try {
 		return JSON.parse(fs.readFileSync(filename, 'utf8'));
@@ -91,7 +93,9 @@ function resolveTypescript(root, tsdk = '') {
 		}
 		const result = inspectPackage(directory, true);
 		if (!result) {
-			throw new Error('tsdk.path must point to an installed TypeScript 7+ package with a launcher for this platform');
+			throw new ResolutionError(
+				'tsdk.path must point to an installed TypeScript 7+ package with a launcher for this platform',
+			);
 		}
 		return result;
 	}
@@ -100,7 +104,12 @@ function resolveTypescript(root, tsdk = '') {
 	for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
 		const dependencies = manifest[section];
 		if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) continue;
-		for (const key of Object.keys(dependencies).sort()) {
+		const keys = Object.keys(dependencies).sort();
+		if (Object.hasOwn(dependencies, 'typescript')) {
+			keys.splice(keys.indexOf('typescript'), 1);
+			keys.unshift('typescript');
+		}
+		for (const key of keys) {
 			if (!isCandidate(key, dependencies[key])) continue;
 			const directory = packageDirectory(root, key);
 			const result = directory && inspectPackage(directory);
@@ -118,9 +127,14 @@ if (process.argv[1] === '--zed-typescript-resolve') {
 			platform: { os: process.platform, arch: process.arch },
 			package: resolveTypescript(process.argv[2], process.argv[3]),
 		}));
-	} catch {
-		// Do not expose subprocess environment or arbitrary package contents.
-		process.stdout.write(JSON.stringify({ error: 'Could not resolve a usable TypeScript 7+ package' }));
+	} catch (error) {
+		// Only deliberate resolver errors are safe to display. Unexpected errors
+		// may include subprocess environment or arbitrary package contents.
+		process.stdout.write(JSON.stringify({
+			error: error instanceof ResolutionError
+				? error.message
+				: 'Could not resolve a usable TypeScript 7+ package',
+		}));
 		process.exitCode = 1;
 	}
 }

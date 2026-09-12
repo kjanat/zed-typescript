@@ -32,7 +32,8 @@ The extension resolves the TypeScript 7+ package to run, preferring the project'
    `optionalDependencies`) whose effective package name is `typescript`: a direct dependency or an
    `npm:` alias under any key (such as `"@typescript/native": "npm:typescript@^7"`). Verifies that
    the installed package is >=7 and has a usable launcher. (Skips `@typescript/typescript6` compat
-   aliases.)
+   aliases.) Within each section, `typescript` is tried first, followed by aliases in alphabetical
+   order. Sections are checked in the order listed above.
 3. Otherwise: a managed installation in the extension's own directory. Stable releases are
    downloaded directly from GitHub; npm handles tags, ranges, and prerelease versions.
 
