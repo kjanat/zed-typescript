@@ -28,21 +28,63 @@ The extension resolves the TypeScript 7+ package to run, preferring the project'
 1. `tsdk.path` (explicit, version checked). Accepts the package root, its `lib` dir (VS Code
    `typescript.tsdk` convention), a `bin/tsc` path, or a platform package containing the native
    binary.
-2. Any dep (dependencies/devDependencies/peerDependencies) in the worktree `package.json` whose
-   effective package name is `typescript`: either a direct `"typescript"` dependency or an `npm:`
-   alias under any key (such as `"@typescript/native": "npm:typescript@^7"`). Verifies that the
-   installed package is >=7 and has a usable launcher. (Skips `@typescript/typescript6` compat
-   aliases.)
-3. Otherwise: managed `npm install typescript` into the extension's own directory (version >=7
-   enforced).
+2. Any dep in the worktree `package.json` (`dependencies`, `devDependencies`, `peerDependencies`, or
+   `optionalDependencies`) whose effective package name is `typescript`: a direct dependency or an
+   `npm:` alias under any key (such as `"@typescript/native": "npm:typescript@^7"`). Verifies that
+   the installed package is >=7 and has a usable launcher. (Skips `@typescript/typescript6` compat
+   aliases.) Within each section, `typescript` is tried first, followed by aliases in alphabetical
+   order. Sections are checked in the order listed above.
+3. Otherwise: a managed installation in the extension's own directory. Stable releases are
+   downloaded directly from GitHub; npm handles tags, ranges, and prerelease versions.
+
+Project and host discovery run a short-lived helper using Node from the worktree's `PATH`, falling
+back to Zed's Node runtime when no Node is found there. The helper uses the extension's
+`process:exec` capability. This allows it to inspect installed packages outside the extension's WASM
+filesystem. It follows ancestor `node_modules` directories and pnpm symlinks, checks the installed
+package name and version, and returns the native binary or Node launcher path. `catalog:`, named
+catalogs, and `workspace:`/`link:`/`file:` dependencies are identified from their installed
+metadata, including aliases. No catalog parsing or package-manager command is needed. Missing,
+outdated, or unusable project installations fall back to the managed install; an invalid explicit
+`tsdk.path` reports an error.
+
+Discovery starts from the opened worktree's `package.json`. It does not choose among child
+workspaces with different TypeScript versions, and Yarn PnP layouts without `node_modules` are not
+supported by automatic discovery. Use `tsdk.path` to select a specific installation.
 
 For managed installs, `version` wins over `updateChannel`:
 
-| Setting                   | Install behavior                                                    |
-| ------------------------- | ------------------------------------------------------------------- |
-| `version`                 | Install any npm version spec, such as `7.0.2`, `next`, or `^7.0.0`. |
-| `updateChannel: "latest"` | Install the latest stable `typescript` package.                     |
-| `updateChannel: "next"`   | Install `typescript@next`, matching TypeScript's nightly channel.   |
+| Setting                       | Install behavior                                                       |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| `version: "7.0.2"`            | Download the platform archive from GitHub release `v7.0.2`.            |
+| `version: "latest"`           | Download the latest stable GitHub release.                             |
+| Other `version` specs         | Use npm for tags, ranges and prerelease pins, such as `next` or `^7`.  |
+| `updateChannel: "latest"`     | Download the latest stable GitHub release (default).                   |
+| `updateChannel: "prerelease"` | Download the latest GitHub release with assets, including prereleases. |
+| `updateChannel: "next"`       | Install `typescript@next` through npm.                                 |
+
+GitHub installations include the native executable and its standard libraries. Each version is
+cached separately and reused after a complete download. Concurrent downloads use independent
+installation directories and publish only after validation; existing launch paths remain intact.
+Stable and prerelease channels keep separate cache selections, so switching back to stable also
+stays stable offline. When a release lookup is unavailable, that channel's previous cached release
+can still start. An existing stable managed npm installation can also be reused if the default
+GitHub installation fails. For an exact version pin, this fallback requires the same installed
+version. Exact versions never fall back to a different version.
+
+An explicit Node runtime in `binary.path` keeps using npm for managed installations because it needs
+the package's `bin/tsc` launcher. With the prerelease channel, npm installs the exact version
+selected from GitHub and records that selection after installation. If GitHub is unavailable on a
+later start, it reuses that exact installed version when its metadata and Node launcher are still
+present. Project and host discovery use the short-lived Node helper; downloading and running a
+managed GitHub release does not require npm or a Node launcher.
+
+For a FreeBSD server host, install Node and make `node` available on the worktree's `PATH`. Zed's
+managed Node downloader does not support FreeBSD. The helper detects the server host's OS and
+architecture, so FreeBSD x64 and arm64 select `typescript-freebsd-x64.tgz` and
+`typescript-freebsd-arm64.tgz`, respectively. Other hosts use the matching asset when the selected
+release provides one; a missing asset produces an error. Discovery does not use Zed's restricted
+platform enums. The native language server runs directly after discovery. npm-based channels
+additionally need an npm runtime usable by Zed on the server host.
 
 TypeScript 6 and older are rejected — for those, use Zed's built-in TypeScript support instead.
 
@@ -57,7 +99,7 @@ which pulls it via `workspace/configuration`.
 | Setting             | Meaning                                                                                                     |
 | ------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `version`           | npm version spec to install (wins over `updateChannel`).                                                    |
-| `updateChannel`     | `"latest"` or `"next"`.                                                                                     |
+| `updateChannel`     | `"latest"`, `"prerelease"` (GitHub including prereleases), or `"next"` (npm nightly).                       |
 | `tsdk.path`         | Explicit TypeScript package location (see [Server resolution](#server-resolution)).                         |
 | `server.pprofDir`   | Passes `--pprofDir` so the server writes pprof CPU/memory profiles there.                                   |
 | `server.goMemLimit` | Sets `GOMEMLIMIT` for the server. Integer bytes with optional `B`/`KiB`/`MiB`/`GiB`/`TiB` suffix, or `off`. |
@@ -209,6 +251,9 @@ Preferences set via the configuration sections update live on `workspace/didChan
 Prerequisite: Rust installed with `rustup`.
 
 In Zed, run `zed: install dev extension` and select this directory.
+
+Run `cargo test` for the Rust tests and `node --test tests/resolve_typescript.test.cjs` for the host
+resolver tests. After changing the extension, use **Rebuild** on Zed's Extensions page.
 
 After edits, rebuild from the Extensions page.\
 For logs, run Zed with `zed --foreground` or use `zed: open log`.

@@ -2,7 +2,7 @@
 
 id             = "typescript"
 name           = "TypeScript"
-version        = "0.0.2"
+version        = "0.0.3"
 schema_version = 1
 authors        = ["Kaj Kowalski <info@kajkowalski.nl>"]
 description    = "Runs the TypeScript 7+ language server in Zed."
@@ -21,3 +21,13 @@ languages = ["JavaScript", "JSX", "TypeScript", "TSX"]
 [[capabilities]]
 kind    = "npm:install"
 package = "typescript"
+
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["microsoft", "TypeScript", "releases", "download", "*", "*"]
+
+[[capabilities]]
+kind    = "process:exec"
+command = "*"
+args    = ["--input-type=commonjs", "--eval", "*", "--", "--zed-typescript-resolve", "*", "*"]

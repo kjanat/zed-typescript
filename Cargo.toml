@@ -1,6 +1,6 @@
 [package]
 name    = "typescript-zed"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 publish = false
 
@@ -8,4 +8,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+semver            = "1.0"
 zed_extension_api = "0.7.0"
+
+[lints.clippy]
+disallowed_methods = "deny"
+disallowed_types   = "deny"

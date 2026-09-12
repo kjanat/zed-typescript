@@ -6,9 +6,26 @@ pub const TYPESCRIPT_PACKAGE: &str = "typescript";
 pub struct RequestedTypescriptSpec {
     pub install_spec: String,
     pub exact_version: Option<String>,
+    pub include_prereleases: bool,
 }
 
 impl RequestedTypescriptSpec {
+    pub fn uses_github(&self) -> bool {
+        // Nightly/prerelease pins may exist only on npm.
+        self.include_prereleases
+            || self.install_spec == "latest"
+            || self.exact_version.as_deref().is_some_and(|version| {
+                semver::Version::parse(version).is_ok_and(|version| version.pre.is_empty())
+            })
+    }
+
+    pub fn can_reuse_managed_version(&self, installed: &str) -> bool {
+        !self.include_prereleases
+            && (self.install_spec == "latest" || self.matches_installed(Some(installed)))
+            && semver::Version::parse(installed)
+                .is_ok_and(|version| version.major >= 7 && version.pre.is_empty())
+    }
+
     fn matches_installed(&self, installed: Option<&str>) -> bool {
         self.exact_version.as_deref().is_some_and(|exact_version| {
             installed.is_some_and(|installed| installed == exact_version)
@@ -27,33 +44,65 @@ pub fn requested_typescript_spec(
         return Ok(RequestedTypescriptSpec {
             install_spec: version.to_string(),
             exact_version: exact_version(version),
+            include_prereleases: false,
         });
     }
 
     let Some(channel) = settings::string_setting(ext_settings, ExtensionSetting::UpdateChannel)?
     else {
-        return latest_stable_spec();
+        return Ok(latest_request());
     };
 
     match channel.as_str() {
-        "latest" => latest_stable_spec(),
+        "latest" => Ok(latest_request()),
+        "prerelease" => Ok(RequestedTypescriptSpec {
+            include_prereleases: true,
+            ..latest_request()
+        }),
         "next" => Ok(RequestedTypescriptSpec {
             install_spec: "next".to_string(),
             exact_version: None,
+            include_prereleases: false,
         }),
         _ => Err(format!(
-            "unsupported TypeScript update channel `{channel}`; expected `latest` or `next`"
+            "unsupported TypeScript update channel `{channel}`; expected `latest`, `prerelease` or `next`"
         )),
     }
 }
 
-fn latest_stable_spec() -> Result<RequestedTypescriptSpec> {
+fn latest_request() -> RequestedTypescriptSpec {
+    RequestedTypescriptSpec {
+        install_spec: "latest".into(),
+        exact_version: None,
+        include_prereleases: false,
+    }
+}
+
+/// Resolve npm's latest tag only when npm is the selected installation source.
+pub fn npm_spec(requested: RequestedTypescriptSpec) -> Result<RequestedTypescriptSpec> {
+    // A custom Node runtime needs npm's launcher. Resolve the GitHub channel
+    // first so it still runs the selected release, rather than npm's latest tag.
+    if requested.include_prereleases {
+        let release = zed::latest_github_release(
+            "microsoft/TypeScript",
+            zed::GithubReleaseOptions {
+                require_assets: true,
+                pre_release: true,
+            },
+        )
+        .map(|release| release.version);
+        return npm_prerelease_spec(release, std::path::Path::new(&managed_package_dir()?));
+    }
+    if requested.install_spec != "latest" {
+        return Ok(requested);
+    }
     match zed::npm_package_latest_version(TYPESCRIPT_PACKAGE) {
         Ok(latest) => {
             ensure_typescript_7_or_newer(&latest)?;
             Ok(RequestedTypescriptSpec {
                 install_spec: latest.clone(),
                 exact_version: Some(latest),
+                include_prereleases: false,
             })
         }
         // registry unreachable (offline, proxy): reuse an existing managed 7+
@@ -63,11 +112,51 @@ fn latest_stable_spec() -> Result<RequestedTypescriptSpec> {
                 Ok(RequestedTypescriptSpec {
                     install_spec: installed.clone(),
                     exact_version: Some(installed),
+                    include_prereleases: false,
                 })
             }
             _ => Err(error),
         },
     }
+}
+
+const NPM_PRERELEASE_MARKER: &str = ".zed-github-prerelease";
+
+fn remember_npm_prerelease(directory: &std::path::Path, version: &str) -> Result<()> {
+    node_shim_path(&directory.to_string_lossy())?;
+    std::fs::write(directory.join(NPM_PRERELEASE_MARKER), version)
+        .map_err(|error| format!("failed to save the installed prerelease selection: {error}"))
+}
+
+fn installed_prerelease(directory: &std::path::Path) -> Option<String> {
+    let selected = std::fs::read_to_string(directory.join(NPM_PRERELEASE_MARKER)).ok()?;
+    let version = exact_version(selected.trim())?;
+    ensure_typescript_7_or_newer(&version).ok()?;
+    let metadata: zed::serde_json::Value =
+        zed::serde_json::from_slice(&std::fs::read(directory.join("package.json")).ok()?).ok()?;
+    (metadata["name"].as_str() == Some(TYPESCRIPT_PACKAGE)
+        && metadata["version"].as_str() == Some(version.as_str())
+        && directory.join("bin/tsc").is_file())
+    .then_some(version)
+}
+
+fn npm_prerelease_spec(
+    release: Result<String>,
+    directory: &std::path::Path,
+) -> Result<RequestedTypescriptSpec> {
+    let version = match release {
+        Ok(release) => exact_version(&release)
+            .ok_or_else(|| "Invalid TypeScript version in GitHub release".to_string())?,
+        // Only reuse a successful selection from this channel, with its exact
+        // installed version and launcher still present after a restart.
+        Err(error) => installed_prerelease(directory).ok_or(error)?,
+    };
+    ensure_typescript_7_or_newer(&version)?;
+    Ok(RequestedTypescriptSpec {
+        install_spec: version.clone(),
+        exact_version: Some(version),
+        include_prereleases: true,
+    })
 }
 
 /// Installs the requested `typescript` package into the extension's working
@@ -94,7 +183,14 @@ pub fn install_managed_typescript(
         .ok_or_else(|| "TypeScript was not installed after npm install completed".to_string())?;
     ensure_typescript_7_or_newer(installed)?;
 
-    managed_package_dir()
+    let directory = managed_package_dir()?;
+    if requested.include_prereleases {
+        if !requested.matches_installed(Some(installed)) {
+            return Err("npm installed a different TypeScript version than requested".into());
+        }
+        remember_npm_prerelease(std::path::Path::new(&directory), installed)?;
+    }
+    Ok(directory)
 }
 
 pub fn managed_package_dir() -> Result<String> {
@@ -106,131 +202,19 @@ pub fn managed_package_dir() -> Result<String> {
     Ok(path.to_string_lossy().into_owned().replace('\\', "/"))
 }
 
-/// Normalizes a `tsdk.path` setting (VS Code convention: the package's `lib`
-/// directory; also accepted: the package root or a `bin/tsc` path) into the
-/// package root directory, resolved against the worktree when relative.
-pub fn tsdk_package_dir(worktree: &zed::Worktree, tsdk_path: &str) -> String {
-    let trimmed = tsdk_path.trim().trim_end_matches(['/', '\\']);
-    let root = worktree
-        .root_path()
-        .replace('\\', "/")
-        .trim_end_matches('/')
-        .to_string();
-    let base = if trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.contains(':') {
-        trimmed.to_string()
-    } else {
-        format!("{root}/{trimmed}")
-    };
-
-    let norm = base.replace('\\', "/");
-    for suffix in ["/bin/tsc.js", "/bin/tsc", "/lib", "/bin"] {
-        if let Some(stripped) = norm.strip_suffix(suffix) {
-            return stripped.to_string();
-        }
-    }
-    norm
-}
-
-/// Finds a usable project-local TypeScript 7+ package by scanning `package.json`
-/// dependency sections. npm aliases may use any dependency key, but their
-/// target package must be `typescript`.
-pub fn find_local_typescript_package_dir(worktree: &zed::Worktree) -> Option<String> {
-    let content = worktree.read_text_file("package.json").ok()?;
-    let pkg: zed::serde_json::Value = zed::serde_json::from_str(&content).ok()?;
-
-    let root = worktree
-        .root_path()
-        .replace('\\', "/")
-        .trim_end_matches('/')
-        .to_string();
-
-    find_typescript_dependency(&pkg, &root)
-}
-
-fn find_typescript_dependency(pkg: &zed::serde_json::Value, root: &str) -> Option<String> {
-    for section in ["dependencies", "devDependencies", "peerDependencies"] {
-        let Some(dependencies) = pkg.get(section).and_then(|value| value.as_object()) else {
-            continue;
-        };
-
-        for (key, value) in dependencies {
-            let Some(spec) = value.as_str() else {
-                continue;
-            };
-            if dependency_package_name(key, spec) != Some(TYPESCRIPT_PACKAGE) {
-                continue;
-            }
-
-            let dir = format!("{root}/node_modules/{key}");
-            let Ok(version) = typescript_version_from_package_dir(&dir) else {
-                continue;
-            };
-            if ensure_typescript_7_or_newer(&version).is_ok()
-                && has_usable_typescript_launcher(&dir)
-            {
-                return Some(dir);
-            }
-        }
-    }
-
-    None
-}
-
-fn dependency_package_name<'a>(key: &'a str, spec: &'a str) -> Option<&'a str> {
-    let spec = spec.trim();
-    let Some(alias) = spec.strip_prefix("npm:") else {
-        return Some(key);
-    };
-
-    let version_separator = if let Some(scoped_alias) = alias.strip_prefix('@') {
-        scoped_alias.rfind('@').map(|position| position + 1)
-    } else {
-        alias.rfind('@')
-    };
-    let package_name = version_separator.map_or(alias, |position| &alias[..position]);
-    (!package_name.is_empty()).then_some(package_name)
-}
-
-fn has_usable_typescript_launcher(package_dir: &str) -> bool {
-    node_shim_path(package_dir).is_ok() || find_native_server_binary(package_dir).is_some()
-}
-
-pub fn typescript_version_from_package_dir(package_dir: &str) -> Result<String> {
-    let pkg_json = format!("{package_dir}/package.json");
-    let content = std::fs::read_to_string(&pkg_json)
-        .map_err(|error| format!("failed to read {pkg_json}: {error}"))?;
-    let pkg: zed::serde_json::Value = zed::serde_json::from_str(&content)
-        .map_err(|error| format!("invalid {pkg_json}: {error}"))?;
-    pkg.get("version")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("no version in {pkg_json}"))
-}
-
 /// Locates the native `tsc` executable that ships in the per-platform
 /// `@typescript/typescript-<platform>-<arch>` package next to (or inside) the
-/// resolved `typescript` package. Returns `None` when the platform has no
+/// managed `typescript` package inside the WASI work directory.
+/// Returns `None` when the platform has no
 /// prebuilt binary or the package layout is not recognized (pnpm virtual
 /// stores, unusual hoisting) — callers fall back to running the package's
 /// `bin/tsc` Node shim, which performs Node module resolution instead.
-pub fn find_native_server_binary(package_dir: &str) -> Option<String> {
-    let (os, arch) = zed::current_platform();
-    let platform = match os {
-        zed::Os::Mac => "darwin",
-        zed::Os::Linux => "linux",
-        zed::Os::Windows => "win32",
-    };
-    let arch = match arch {
-        zed::Architecture::Aarch64 => "arm64",
-        zed::Architecture::X8664 => "x64",
-        zed::Architecture::X86 => return None,
-    };
-    let exe = match os {
-        zed::Os::Windows => "tsc.exe",
-        _ => "tsc",
-    };
-
-    let platform_package = format!("@typescript/typescript-{platform}-{arch}");
+pub fn find_native_server_binary(
+    package_dir: &str,
+    platform: &crate::host_platform::Platform,
+) -> Option<String> {
+    let exe = platform.executable;
+    let platform_package = format!("@typescript/typescript-{}", platform.name);
     let candidates = [
         // `package_dir` is itself a platform package (tsdk.path pointed straight at it)
         format!("{package_dir}/lib/{exe}"),
@@ -275,154 +259,87 @@ pub fn ensure_typescript_7_or_newer(version: &str) -> Result<()> {
 }
 
 fn exact_version(version: &str) -> Option<String> {
-    let v = version.strip_prefix('v').unwrap_or(version).trim();
-    if v.is_empty() {
-        return None;
-    }
-    if !v.chars().next().unwrap_or(' ').is_ascii_digit() {
-        return None;
-    }
-    let ok = v
-        .chars()
-        .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c.is_ascii_alphabetic());
-    if ok { Some(v.to_string()) } else { None }
+    let v = version.trim().strip_prefix('v').unwrap_or(version.trim());
+    semver::Version::parse(v)
+        .ok()
+        .map(|version| version.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
-    struct TestProject {
-        root: PathBuf,
+    #[test]
+    fn managed_npm_fallback_respects_exact_pins_and_release_channels() {
+        for pin in ["7.0.2", "v7.0.2"] {
+            let request =
+                requested_typescript_spec(&Some(zed::serde_json::json!({"version": pin}))).unwrap();
+            assert!(request.can_reuse_managed_version("7.0.2"));
+            for other in [
+                "7.0.1",
+                "7.0.3",
+                "8.0.0",
+                "7.0.2-beta.1",
+                "6.0.2",
+                "invalid",
+            ] {
+                assert!(!request.can_reuse_managed_version(other), "{pin}: {other}");
+            }
+        }
+        for settings in [None, Some(zed::serde_json::json!({"version": "latest"}))] {
+            let request = requested_typescript_spec(&settings).unwrap();
+            assert!(request.can_reuse_managed_version("7.0.2"));
+            assert!(request.can_reuse_managed_version("8.0.0"));
+            assert!(!request.can_reuse_managed_version("7.1.0-beta.1"));
+            assert!(!request.can_reuse_managed_version("6.0.2"));
+        }
+        for settings in [
+            zed::serde_json::json!({"updateChannel": "prerelease"}),
+            zed::serde_json::json!({"updateChannel": "next"}),
+            zed::serde_json::json!({"version": "^7"}),
+        ] {
+            let request = requested_typescript_spec(&Some(settings)).unwrap();
+            assert!(!request.can_reuse_managed_version("7.0.2"));
+        }
     }
 
-    impl TestProject {
-        fn new(name: &str) -> Self {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-
-            let root = std::env::temp_dir().join(format!(
-                "typescript-zed-{name}-{}-{}",
-                std::process::id(),
-                NEXT_ID.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir_all(&root).expect("create test project directory");
-            Self { root }
-        }
-
-        fn add_package(&self, key: &str, version: &str, has_launcher: bool) -> String {
-            let package_dir = self.root.join("node_modules").join(key);
-            std::fs::create_dir_all(&package_dir).expect("create test package directory");
+    #[test]
+    fn npm_prerelease_offline_restart_requires_its_installed_selection() {
+        let directory =
+            std::env::temp_dir().join(format!("typescript-npm-prerelease-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("bin")).unwrap();
+        for version in ["7.1.0-beta.1", "7.0.2"] {
             std::fs::write(
-                package_dir.join("package.json"),
-                format!(r#"{{"version":"{version}"}}"#),
+                directory.join("package.json"),
+                zed::serde_json::json!({
+                    "name": "typescript", "version": version,
+                })
+                .to_string(),
             )
-            .expect("write test package.json");
-
-            if has_launcher {
-                let bin_dir = package_dir.join("bin");
-                std::fs::create_dir_all(&bin_dir).expect("create test package bin directory");
-                std::fs::write(bin_dir.join("tsc"), "").expect("write test tsc launcher");
-            }
-
-            package_dir
-                .to_string_lossy()
-                .into_owned()
-                .replace('\\', "/")
+            .unwrap();
+            std::fs::write(directory.join("bin/tsc"), "launcher").unwrap();
+            remember_npm_prerelease(&directory, version).unwrap();
+            // No in-memory state survives: the installed selection is enough.
+            let request = npm_prerelease_spec(Err("offline".into()), &directory).unwrap();
+            assert_eq!(request.exact_version.as_deref(), Some(version));
+            assert!(request.include_prereleases);
+            assert!(request.matches_installed(Some(version)));
+            // A newer online selection does not overwrite the successful one.
+            let next = npm_prerelease_spec(Ok("v7.2.0-beta.1".into()), &directory).unwrap();
+            assert_eq!(next.exact_version.as_deref(), Some("7.2.0-beta.1"));
+            assert_eq!(installed_prerelease(&directory).as_deref(), Some(version));
+            std::fs::remove_file(directory.join("bin/tsc")).unwrap();
+            assert!(remember_npm_prerelease(&directory, "7.2.0-beta.1").is_err());
+            assert!(npm_prerelease_spec(Err("offline".into()), &directory).is_err());
         }
-
-        fn root(&self) -> String {
-            self.root.to_string_lossy().into_owned().replace('\\', "/")
+        std::fs::write(directory.join("bin/tsc"), "launcher").unwrap();
+        for marker in ["7.9.0-beta.1", "6.0.2", "garbage"] {
+            std::fs::write(directory.join(NPM_PRERELEASE_MARKER), marker).unwrap();
+            assert!(npm_prerelease_spec(Err("offline".into()), &directory).is_err());
         }
-    }
-
-    impl Drop for TestProject {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
-    #[test]
-    fn test_dependency_package_name() {
-        let cases = [
-            (("typescript", "^7.0.2"), Some("typescript")),
-            (("typescript", "^8.0.0"), Some("typescript")),
-            (
-                ("@typescript/native", "npm:typescript@^7.0.2"),
-                Some("typescript"),
-            ),
-            (("whatever", " npm:typescript@next "), Some("typescript")),
-            (("foo", "^7.2.0"), Some("foo")),
-            (("foo", "npm:bar@7.0.0"), Some("bar")),
-            (
-                ("typescript", "npm:@typescript/typescript6@^6.0.2"),
-                Some("@typescript/typescript6"),
-            ),
-            (("foo", "npm:@scope/package@next"), Some("@scope/package")),
-            (("foo", "npm:@scope/package"), Some("@scope/package")),
-            (("foo", "npm:"), None),
-        ];
-
-        for ((key, spec), expected) in cases {
-            assert_eq!(dependency_package_name(key, spec), expected);
-        }
-    }
-
-    #[test]
-    fn test_find_dependency_ignores_unrelated_7_and_accepts_typescript_8() {
-        let project = TestProject::new("package-identity");
-        project.add_package("foo", "7.2.0", true);
-        let typescript_dir = project.add_package("typescript", "8.0.0", true);
-        let manifest = zed::serde_json::json!({
-            "dependencies": {
-                "foo": "^7.2.0",
-                "typescript": "^8.0.0"
-            }
-        });
-
-        assert_eq!(
-            find_typescript_dependency(&manifest, &project.root()),
-            Some(typescript_dir)
-        );
-    }
-
-    #[test]
-    fn test_find_dependency_supports_side_by_side_aliases() {
-        let project = TestProject::new("side-by-side-aliases");
-        let native_dir = project.add_package("@typescript/native", "7.0.2", true);
-        project.add_package("typescript", "6.0.2", true);
-        let manifest = zed::serde_json::json!({
-            "devDependencies": {
-                "@typescript/native": "npm:typescript@^7.0.2",
-                "typescript": "npm:@typescript/typescript6@^6.0.2"
-            }
-        });
-
-        assert_eq!(
-            find_typescript_dependency(&manifest, &project.root()),
-            Some(native_dir)
-        );
-    }
-
-    #[test]
-    fn test_find_dependency_continues_after_outdated_alias() {
-        let project = TestProject::new("continue-after-outdated");
-        project.add_package("a-typescript", "6.0.2", true);
-        let usable_dir = project.add_package("z-typescript", "7.0.2", true);
-        let manifest = zed::serde_json::json!({
-            "dependencies": {
-                "a-typescript": "npm:typescript@6.0.2",
-                "z-typescript": "npm:typescript@7.0.2"
-            }
-        });
-
-        assert_eq!(
-            find_typescript_dependency(&manifest, &project.root()),
-            Some(usable_dir)
-        );
+        std::fs::remove_file(directory.join(NPM_PRERELEASE_MARKER)).unwrap();
+        assert!(npm_prerelease_spec(Err("offline".into()), &directory).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -443,5 +360,57 @@ mod tests {
         assert_eq!(exact_version("latest"), None);
         assert_eq!(exact_version("next"), None);
         assert_eq!(exact_version("^7"), None);
+        assert_eq!(exact_version("7"), None);
+        assert_eq!(exact_version("7.0"), None);
+        assert_eq!(exact_version("7.0.x"), None);
+        assert_eq!(exact_version("7.0.0garbage"), None);
+    }
+
+    #[test]
+    fn prerelease_channel_is_opt_in_and_version_still_wins() {
+        let settings = Some(zed::serde_json::json!({"updateChannel": "prerelease"}));
+        let requested = requested_typescript_spec(&settings).unwrap();
+        assert!(requested.uses_github());
+        assert!(requested.include_prereleases);
+        assert!(requested.exact_version.is_none());
+        assert!(
+            !requested_typescript_spec(&None)
+                .unwrap()
+                .include_prereleases
+        );
+
+        for version in ["7.0.2", "next", "prerelease"] {
+            let settings =
+                Some(zed::serde_json::json!({"version": version, "updateChannel": "prerelease"}));
+            let requested = requested_typescript_spec(&settings).unwrap();
+            assert!(!requested.include_prereleases);
+            assert_eq!(requested.install_spec, version);
+        }
+    }
+
+    #[test]
+    fn managed_source_preserves_npm_tags_and_ranges() {
+        for (spec, github) in [
+            ("7.0.2", true),
+            ("v7.0.2", true),
+            ("7.0.0-dev.20260912", false),
+            ("latest", true),
+            ("next", false),
+            ("beta", false),
+            ("7", false),
+            ("7.0.x", false),
+            ("^7.0.0", false),
+            (">=6 <7 || >=7", false),
+        ] {
+            let settings = Some(zed::serde_json::json!({ "version": spec }));
+            assert_eq!(
+                requested_typescript_spec(&settings).unwrap().uses_github(),
+                github,
+                "{spec}"
+            );
+        }
+        assert!(requested_typescript_spec(&None).unwrap().uses_github());
+        let settings = Some(zed::serde_json::json!({"version": "next", "updateChannel": "latest"}));
+        assert!(!requested_typescript_spec(&settings).unwrap().uses_github());
     }
 }

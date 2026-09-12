@@ -1,3 +1,6 @@
+mod github_package;
+mod host_platform;
+mod project_package;
 mod settings;
 mod typescript_package;
 
@@ -9,36 +12,43 @@ struct TypeScriptExtension {
 }
 
 impl TypeScriptExtension {
-    /// Resolves the directory of the TypeScript 7+ package to run, preferring
+    /// Resolves checked launchers for the TypeScript 7+ package to run, preferring
     /// an explicit `tsdk.path`, then a project-local dependency, then a
     /// managed install into the extension's working directory.
-    fn resolve_package_dir(
+    fn resolve_package(
         &mut self,
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
         ext_settings: &Option<zed::serde_json::Value>,
-    ) -> Result<String> {
-        if let Some(tsdk_path) = settings::string_setting(ext_settings, ExtensionSetting::TsdkPath)?
-        {
-            let dir = typescript_package::tsdk_package_dir(worktree, &tsdk_path);
-            let version = typescript_package::typescript_version_from_package_dir(&dir)
-                .map_err(|error| format!("tsdk.path `{tsdk_path}` resolved to `{dir}`: {error}"))?;
-            typescript_package::ensure_typescript_7_or_newer(&version)?;
-            return Ok(dir);
-        }
-
-        if let Some(dir) = typescript_package::find_local_typescript_package_dir(worktree) {
-            return Ok(dir);
+        require_node_shim: bool,
+    ) -> Result<project_package::ResolvedPackage> {
+        let tsdk = settings::string_setting(ext_settings, ExtensionSetting::TsdkPath)?;
+        let discovery = project_package::resolve(worktree, tsdk.as_deref())?;
+        if let Some(package) = discovery.package {
+            return Ok(package);
         }
         // no usable local TypeScript 7+ dep, fall back to a managed install
-
-        self.install_managed(language_server_id, ext_settings)
+        let directory = self.install_managed(
+            language_server_id,
+            ext_settings,
+            require_node_shim,
+            &discovery.platform,
+        )?;
+        let native = typescript_package::find_native_server_binary(&directory, &discovery.platform);
+        let shim = typescript_package::node_shim_path(&directory).ok();
+        Ok(project_package::ResolvedPackage {
+            directory,
+            native,
+            shim,
+        })
     }
 
     fn install_managed(
         &mut self,
         language_server_id: &LanguageServerId,
         ext_settings: &Option<zed::serde_json::Value>,
+        require_node_shim: bool,
+        platform: &host_platform::Platform,
     ) -> Result<String> {
         zed::set_language_server_installation_status(
             language_server_id,
@@ -47,9 +57,37 @@ impl TypeScriptExtension {
 
         let requested = typescript_package::requested_typescript_spec(ext_settings)?;
 
+        if !require_node_shim && requested.uses_github() {
+            return github_package::install(
+                language_server_id,
+                requested.exact_version.as_deref(),
+                requested.include_prereleases,
+                platform,
+            )
+            .or_else(|error| {
+                // Preserve offline startup for users upgrading from the npm installer.
+                if let Ok(Some(version)) = zed::npm_package_installed_version("typescript")
+                    && requested.can_reuse_managed_version(&version)
+                    && let Ok(directory) = typescript_package::managed_package_dir()
+                    && (typescript_package::find_native_server_binary(&directory, platform)
+                        .is_some()
+                        || typescript_package::node_shim_path(&directory).is_ok())
+                {
+                    return Ok(directory);
+                }
+                Err(error)
+            });
+        }
+        let requested = typescript_package::npm_spec(requested)?;
+
         // fast path: if spec matches exactly (pinned version), skip queries and npm
-        if self.installed_spec.as_deref() == Some(requested.install_spec.as_str()) {
-            return typescript_package::managed_package_dir();
+        if !requested.include_prereleases
+            && self.installed_spec.as_deref() == Some(requested.install_spec.as_str())
+        {
+            let directory = typescript_package::managed_package_dir()?;
+            if typescript_package::node_shim_path(&directory).is_ok() {
+                return Ok(directory);
+            }
         }
 
         let package_dir =
@@ -83,9 +121,9 @@ impl TypeScriptExtension {
                 } else {
                     // treat path as custom node; still resolve the tsc launcher + flags
                     // (never use which("tsc") — PATH tsc is often a volta/fnm/etc shim, not a raw JS to feed to node)
-                    let package_dir =
-                        self.resolve_package_dir(language_server_id, worktree, &ext_settings)?;
-                    let shim = typescript_package::node_shim_path(&package_dir)?;
+                    let package =
+                        self.resolve_package(language_server_id, worktree, &ext_settings, true)?;
+                    let shim = package.node_shim()?;
                     let args: Vec<String> = std::iter::once(shim)
                         .chain(lsp_args(&ext_settings)?)
                         .collect();
@@ -96,15 +134,15 @@ impl TypeScriptExtension {
             return Ok(zed::Command { command, args, env });
         }
 
-        let package_dir = self.resolve_package_dir(language_server_id, worktree, &ext_settings)?;
+        let package = self.resolve_package(language_server_id, worktree, &ext_settings, false)?;
         let args = lsp_args(&ext_settings)?;
         let env = server_env(worktree, &ext_settings, binary_env)?;
 
         // 2. run the native server binary directly when the platform package is
         //    resolvable — no Node process involved.
-        if let Some(native) = typescript_package::find_native_server_binary(&package_dir) {
+        if let Some(native) = package.native.as_ref() {
             return Ok(zed::Command {
-                command: native,
+                command: native.clone(),
                 args,
                 env,
             });
@@ -113,12 +151,8 @@ impl TypeScriptExtension {
         // 3. fall back to the package's Node launcher, which resolves the native
         //    binary via Node module resolution (covers pnpm and exotic layouts).
         //    Prefer the user's node (volta etc) via which, else Zed's bundled node.
-        let node_cmd = if let Some(p) = worktree.which("node") {
-            p
-        } else {
-            zed::node_binary_path()?
-        };
-        let shim = typescript_package::node_shim_path(&package_dir)?;
+        let node_cmd = project_package::node_binary(worktree)?;
+        let shim = package.node_shim()?;
         let args: Vec<String> = std::iter::once(shim).chain(args).collect();
 
         Ok(zed::Command {
@@ -288,4 +322,15 @@ fn upsert_env(env: &mut Vec<(String, String)>, key: String, value: String) {
     env.push((key, value));
 }
 
-zed::register_extension!(TypeScriptExtension);
+// Zed reads its host-provided PWD to initialize WASI's working directory.
+// Keep this SDK exception confined to the generated registration code.
+#[cfg_attr(
+    target_os = "wasi",
+    expect(
+        clippy::disallowed_methods,
+        reason = "Zed's registration macro reads PWD to initialize the WASI work directory"
+    )
+)]
+mod registration {
+    zed_extension_api::register_extension!(super::TypeScriptExtension);
+}
