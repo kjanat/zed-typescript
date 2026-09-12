@@ -102,11 +102,72 @@ fn valid_package(directory: &Path, platform: &Platform, version: &str) -> bool {
         .all(|file| directory.join("lib").join(file).is_file())
 }
 
-fn cached(root: &Path, platform: &Platform, version: &str) -> Option<PathBuf> {
-    let directory = root.join(version);
+fn completed(directory: &Path, platform: &Platform, version: &str) -> Option<PathBuf> {
     let package = directory.join("package");
     (directory.join("complete").is_file() && valid_package(&package, platform, version))
         .then_some(package)
+}
+
+fn cached(root: &Path, platform: &Platform, version: &str) -> Option<PathBuf> {
+    let directory = root.join(version);
+    // Keep installations made before per-attempt directories usable offline.
+    completed(&directory, platform, version).or_else(|| {
+        fs::read_dir(&directory)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .find_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()?
+                    .starts_with("install-")
+                    .then(|| completed(&entry.path(), platform, version))
+                    .flatten()
+            })
+    })
+}
+
+struct InstallAttempt {
+    directory: PathBuf,
+    published: bool,
+}
+
+impl InstallAttempt {
+    fn new(root: &Path, version: &str) -> Result<Self> {
+        let parent = root.join(version);
+        fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+        // Atomic directory creation reserves a name across Zed processes, even
+        // when they start simultaneously or a previous process was interrupted.
+        for id in 0u64.. {
+            let directory = parent.join(format!("install-{id}"));
+            match fs::create_dir(&directory) {
+                Ok(()) => {
+                    return Ok(Self {
+                        directory,
+                        published: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err("No free TypeScript installation directory".into())
+    }
+
+    fn publish(mut self) -> Result<PathBuf> {
+        // An empty marker atomically exposes this fully validated installation.
+        // Published directories are never replaced or removed by an installer.
+        fs::write(self.directory.join("complete"), "").map_err(|e| e.to_string())?;
+        self.published = true;
+        Ok(self.directory.join("package"))
+    }
+}
+
+impl Drop for InstallAttempt {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
 }
 
 fn install_with(
@@ -158,13 +219,9 @@ fn install_with(
                 .ok_or_else(|| {
                     format!("TypeScript {version} has no `{asset_name}` release asset")
                 })?;
-            let destination = root.join(&version);
-            let partial = root.join(format!("{version}.partial"));
-            if partial.exists() {
-                fs::remove_dir_all(&partial).map_err(|e| e.to_string())?;
-            }
-            fs::create_dir_all(&partial).map_err(|e| e.to_string())?;
-            host.download(&asset.download_url, &partial)?;
+            let attempt = InstallAttempt::new(root, &version)?;
+            let partial = &attempt.directory;
+            host.download(&asset.download_url, partial)?;
             let package = partial.join("package");
             if !valid_package(&package, platform, &version) {
                 return Err(format!(
@@ -172,12 +229,7 @@ fn install_with(
                 ));
             }
             host.executable(&package.join("lib").join(platform.executable))?;
-            fs::write(partial.join("complete"), "").map_err(|e| e.to_string())?;
-            if destination.exists() {
-                fs::remove_dir_all(&destination).map_err(|e| e.to_string())?;
-            }
-            fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
-            destination.join("package")
+            attempt.publish()?
         }
     };
     if requested.is_none() {
@@ -208,6 +260,8 @@ mod tests {
         }
     }
 
+    type DownloadInterleave = Box<dyn FnOnce(&Path)>;
+
     struct FakeHost {
         version: String,
         platform: Platform,
@@ -218,6 +272,7 @@ mod tests {
         lookups: usize,
         prerelease_requests: Vec<bool>,
         permissions: usize,
+        during_download: Option<DownloadInterleave>,
     }
     impl FakeHost {
         fn new() -> Self {
@@ -231,6 +286,7 @@ mod tests {
                 lookups: 0,
                 prerelease_requests: vec![],
                 permissions: 0,
+                during_download: None,
             }
         }
     }
@@ -274,6 +330,9 @@ mod tests {
                     fs::write(package.join("lib").join(file), "").unwrap();
                 }
             }
+            if let Some(interleave) = self.during_download.take() {
+                interleave(destination);
+            }
             Ok(())
         }
         fn executable(&mut self, path: &Path) -> Result<()> {
@@ -281,6 +340,85 @@ mod tests {
             self.permissions += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn overlapping_downloads_keep_both_launch_paths_intact() {
+        for (first_fails, second_fails) in [(false, false), (false, true), (true, false)] {
+            let root = Fixture::new();
+            let platform = Platform::new("linux", "x64").unwrap();
+            let other_package = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let result = other_package.clone();
+            let shared_root = root.0.clone();
+            let mut first = FakeHost::new();
+            first.incomplete = first_fails;
+            first.during_download = Some(Box::new(move |first_partial| {
+                // The first download has extracted files but is not published.
+                assert!(
+                    cached(
+                        &shared_root,
+                        &Platform::new("linux", "x64").unwrap(),
+                        "7.0.2"
+                    )
+                    .is_none()
+                );
+                let mut second = FakeHost::new();
+                second.incomplete = second_fails;
+                let installed = install_with(
+                    &shared_root,
+                    &Platform::new("linux", "x64").unwrap(),
+                    Some("7.0.2"),
+                    false,
+                    &mut second,
+                );
+                if second_fails {
+                    assert!(installed.is_err());
+                } else {
+                    *result.borrow_mut() = Some(installed.unwrap());
+                }
+                assert!(first_partial.join("package/lib/tsc").is_file());
+            }));
+            let first_result = install_with(&root.0, &platform, Some("7.0.2"), false, &mut first);
+            if first_fails {
+                assert!(first_result.is_err());
+            } else {
+                assert!(valid_package(
+                    first_result.as_ref().unwrap(),
+                    &platform,
+                    "7.0.2"
+                ));
+            }
+            if let Some(second_package) = other_package.borrow().as_ref() {
+                assert_ne!(first_result.as_ref().ok(), Some(second_package));
+                assert!(valid_package(second_package, &platform, "7.0.2"));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_cache_and_abandoned_attempts_are_preserved() {
+        let root = Fixture::new();
+        let platform = Platform::new("linux", "x64").unwrap();
+        let mut host = FakeHost::new();
+        let legacy = root.0.join("7.0.2");
+        host.download("fixture", &legacy).unwrap();
+        fs::write(legacy.join("complete"), "").unwrap();
+        host.offline = true;
+        assert_eq!(
+            install_with(&root.0, &platform, Some("7.0.2"), false, &mut host).unwrap(),
+            legacy.join("package")
+        );
+        fs::remove_file(legacy.join("package/lib/tsc")).unwrap();
+        let abandoned = InstallAttempt::new(&root.0, "7.0.2").unwrap();
+        fs::write(abandoned.directory.join("sentinel"), "in progress").unwrap();
+        host.offline = false;
+        let repaired = install_with(&root.0, &platform, Some("7.0.2"), false, &mut host).unwrap();
+        assert!(valid_package(&repaired, &platform, "7.0.2"));
+        assert!(legacy.join("package/lib/lib.dom.d.ts").is_file());
+        assert_eq!(
+            fs::read_to_string(abandoned.directory.join("sentinel")).unwrap(),
+            "in progress"
+        );
     }
 
     #[test]
@@ -399,7 +537,7 @@ mod tests {
         let mut host = FakeHost::new();
         let platform = Platform::new("linux", "x64").unwrap();
         let package = install_with(&root.0, &platform, None, true, &mut host).unwrap();
-        assert!(package.ends_with("7.0.2/package"));
+        assert!(valid_package(&package, &platform, "7.0.2"));
         assert_eq!(
             fs::read_to_string(root.0.join("prerelease")).unwrap(),
             "7.0.2"

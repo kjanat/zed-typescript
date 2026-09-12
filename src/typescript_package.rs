@@ -82,15 +82,9 @@ pub fn npm_spec(requested: RequestedTypescriptSpec) -> Result<RequestedTypescrip
                 require_assets: true,
                 pre_release: true,
             },
-        )?;
-        let version = exact_version(&release.version)
-            .ok_or_else(|| "Invalid TypeScript version in GitHub release".to_string())?;
-        ensure_typescript_7_or_newer(&version)?;
-        return Ok(RequestedTypescriptSpec {
-            install_spec: version.clone(),
-            exact_version: Some(version),
-            include_prereleases: false,
-        });
+        )
+        .map(|release| release.version);
+        return npm_prerelease_spec(release, std::path::Path::new(&managed_package_dir()?));
     }
     if requested.install_spec != "latest" {
         return Ok(requested);
@@ -119,6 +113,45 @@ pub fn npm_spec(requested: RequestedTypescriptSpec) -> Result<RequestedTypescrip
     }
 }
 
+const NPM_PRERELEASE_MARKER: &str = ".zed-github-prerelease";
+
+fn remember_npm_prerelease(directory: &std::path::Path, version: &str) -> Result<()> {
+    node_shim_path(&directory.to_string_lossy())?;
+    std::fs::write(directory.join(NPM_PRERELEASE_MARKER), version)
+        .map_err(|error| format!("failed to save the installed prerelease selection: {error}"))
+}
+
+fn installed_prerelease(directory: &std::path::Path) -> Option<String> {
+    let selected = std::fs::read_to_string(directory.join(NPM_PRERELEASE_MARKER)).ok()?;
+    let version = exact_version(selected.trim())?;
+    ensure_typescript_7_or_newer(&version).ok()?;
+    let metadata: zed::serde_json::Value =
+        zed::serde_json::from_slice(&std::fs::read(directory.join("package.json")).ok()?).ok()?;
+    (metadata["name"].as_str() == Some(TYPESCRIPT_PACKAGE)
+        && metadata["version"].as_str() == Some(version.as_str())
+        && directory.join("bin/tsc").is_file())
+    .then_some(version)
+}
+
+fn npm_prerelease_spec(
+    release: Result<String>,
+    directory: &std::path::Path,
+) -> Result<RequestedTypescriptSpec> {
+    let version = match release {
+        Ok(release) => exact_version(&release)
+            .ok_or_else(|| "Invalid TypeScript version in GitHub release".to_string())?,
+        // Only reuse a successful selection from this channel, with its exact
+        // installed version and launcher still present after a restart.
+        Err(error) => installed_prerelease(directory).ok_or(error)?,
+    };
+    ensure_typescript_7_or_newer(&version)?;
+    Ok(RequestedTypescriptSpec {
+        install_spec: version.clone(),
+        exact_version: Some(version),
+        include_prereleases: true,
+    })
+}
+
 /// Installs the requested `typescript` package into the extension's working
 /// directory and returns the installed package directory.
 pub fn install_managed_typescript(
@@ -143,7 +176,14 @@ pub fn install_managed_typescript(
         .ok_or_else(|| "TypeScript was not installed after npm install completed".to_string())?;
     ensure_typescript_7_or_newer(installed)?;
 
-    managed_package_dir()
+    let directory = managed_package_dir()?;
+    if requested.include_prereleases {
+        if !requested.matches_installed(Some(installed)) {
+            return Err("npm installed a different TypeScript version than requested".into());
+        }
+        remember_npm_prerelease(std::path::Path::new(&directory), installed)?;
+    }
+    Ok(directory)
 }
 
 pub fn managed_package_dir() -> Result<String> {
@@ -221,6 +261,46 @@ fn exact_version(version: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn npm_prerelease_offline_restart_requires_its_installed_selection() {
+        let directory =
+            std::env::temp_dir().join(format!("typescript-npm-prerelease-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("bin")).unwrap();
+        for version in ["7.1.0-beta.1", "7.0.2"] {
+            std::fs::write(
+                directory.join("package.json"),
+                zed::serde_json::json!({
+                    "name": "typescript", "version": version,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(directory.join("bin/tsc"), "launcher").unwrap();
+            remember_npm_prerelease(&directory, version).unwrap();
+            // No in-memory state survives: the installed selection is enough.
+            let request = npm_prerelease_spec(Err("offline".into()), &directory).unwrap();
+            assert_eq!(request.exact_version.as_deref(), Some(version));
+            assert!(request.include_prereleases);
+            assert!(request.matches_installed(Some(version)));
+            // A newer online selection does not overwrite the successful one.
+            let next = npm_prerelease_spec(Ok("v7.2.0-beta.1".into()), &directory).unwrap();
+            assert_eq!(next.exact_version.as_deref(), Some("7.2.0-beta.1"));
+            assert_eq!(installed_prerelease(&directory).as_deref(), Some(version));
+            std::fs::remove_file(directory.join("bin/tsc")).unwrap();
+            assert!(remember_npm_prerelease(&directory, "7.2.0-beta.1").is_err());
+            assert!(npm_prerelease_spec(Err("offline".into()), &directory).is_err());
+        }
+        std::fs::write(directory.join("bin/tsc"), "launcher").unwrap();
+        for marker in ["7.9.0-beta.1", "6.0.2", "garbage"] {
+            std::fs::write(directory.join(NPM_PRERELEASE_MARKER), marker).unwrap();
+            assert!(npm_prerelease_spec(Err("offline".into()), &directory).is_err());
+        }
+        std::fs::remove_file(directory.join(NPM_PRERELEASE_MARKER)).unwrap();
+        assert!(npm_prerelease_spec(Err("offline".into()), &directory).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn test_ensure_7_or_newer() {
         assert!(ensure_typescript_7_or_newer("7.0.0").is_ok());

@@ -84,7 +84,9 @@ impl TypeScriptExtension {
         let requested = typescript_package::npm_spec(requested)?;
 
         // fast path: if spec matches exactly (pinned version), skip queries and npm
-        if self.installed_spec.as_deref() == Some(requested.install_spec.as_str()) {
+        if !requested.include_prereleases
+            && self.installed_spec.as_deref() == Some(requested.install_spec.as_str())
+        {
             let directory = typescript_package::managed_package_dir()?;
             if typescript_package::node_shim_path(&directory).is_ok() {
                 return Ok(directory);

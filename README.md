@@ -62,16 +62,19 @@ For managed installs, `version` wins over `updateChannel`:
 | `updateChannel: "next"`       | Install `typescript@next` through npm.                                 |
 
 GitHub installations include the native executable and its standard libraries. Each version is
-cached separately and reused after a complete download. Stable and prerelease channels keep separate
-cache selections, so switching back to stable also stays stable offline. When a release lookup is
-unavailable, that channel's previous cached release can still start. An existing stable managed npm
-installation can also be reused if the default GitHub installation fails. Exact versions never fall
-back to a different version.
+cached separately and reused after a complete download. Concurrent downloads use independent
+installation directories and publish only after validation; existing launch paths remain intact.
+Stable and prerelease channels keep separate cache selections, so switching back to stable also
+stays stable offline. When a release lookup is unavailable, that channel's previous cached release
+can still start. An existing stable managed npm installation can also be reused if the default
+GitHub installation fails. Exact versions never fall back to a different version.
 
 An explicit Node runtime in `binary.path` keeps using npm for managed installations because it needs
 the package's `bin/tsc` launcher. With the prerelease channel, npm installs the exact version
-selected from GitHub. Project and host discovery use the short-lived Node helper; downloading and
-running a managed GitHub release does not require npm or a Node launcher.
+selected from GitHub and records that selection after installation. If GitHub is unavailable on a
+later start, it reuses that exact installed version when its metadata and Node launcher are still
+present. Project and host discovery use the short-lived Node helper; downloading and running a
+managed GitHub release does not require npm or a Node launcher.
 
 For a FreeBSD server host, install Node and make `node` available on the worktree's `PATH`. Zed's
 managed Node downloader does not support FreeBSD. The helper detects the server host's OS and
