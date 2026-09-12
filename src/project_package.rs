@@ -2,6 +2,7 @@ use crate::host_platform::Platform;
 use zed_extension_api::{self as zed, Result};
 
 const RESOLVER: &str = include_str!("resolve_typescript.cjs");
+const RESOLVER_BOOTSTRAP: &str = include_str!("run_resolver.cjs");
 
 /// Checked host paths. Never re-check project paths with sandboxed `std::fs`.
 pub struct ResolvedPackage {
@@ -47,13 +48,16 @@ pub fn resolve(worktree: &zed::Worktree, tsdk: Option<&str>) -> Result<Discovery
         .args([
             "--input-type=commonjs",
             "--eval",
-            RESOLVER,
+            RESOLVER_BOOTSTRAP.trim(),
             "--",
             "--zed-typescript-resolve",
             &worktree.root_path(),
             tsdk.unwrap_or_default(),
         ])
         .envs(worktree.shell_env())
+        // Volta forwards Node through cmd.exe on Windows, which truncates
+        // multiline --eval arguments. Keep source out of the command line.
+        .env("ZED_TYPESCRIPT_RESOLVER", RESOLVER)
         .output()
         .map_err(|_| "Could not run the TypeScript package resolver; check the extension's process:exec permission".to_string())?;
     if output.status != Some(0) {

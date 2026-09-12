@@ -6,6 +6,34 @@ const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 const vm = require('node:vm');
 const { resolveTypescript } = require('../src/resolve_typescript.cjs');
+const resolverSource = fs.readFileSync(path.join(__dirname, '../src/resolve_typescript.cjs'), 'utf8');
+const resolverBootstrap = fs.readFileSync(path.join(__dirname, '../src/run_resolver.cjs'), 'utf8').trim();
+
+function hostProbe(root, tsdk = '', { throughCommandShell = false, cwd } = {}) {
+	const args = [
+		'--input-type=commonjs',
+		'--eval',
+		resolverBootstrap,
+		'--',
+		'--zed-typescript-resolve',
+		root,
+		tsdk,
+	];
+	const pathKey = Object.keys(process.env).find(key => key.toUpperCase() === 'PATH') || 'PATH';
+	return spawnSync(
+		throughCommandShell ? process.env.ComSpec : process.execPath,
+		throughCommandShell ? ['/C', 'node', ...args] : args,
+		{
+			cwd,
+			encoding: 'utf8',
+			env: {
+				...process.env,
+				[pathKey]: `${path.dirname(process.execPath)}${path.delimiter}${process.env[pathKey] || ''}`,
+				ZED_TYPESCRIPT_RESOLVER: resolverSource,
+			},
+		},
+	);
+}
 
 function project(t) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zed-typescript-'));
@@ -43,15 +71,7 @@ test('host probe finds an external project from an unrelated extension working d
 	json(root, { devDependencies: { typescript: '^7' } });
 	const directory = pkg(root);
 	const { binary } = native(root);
-	const output = spawnSync(process.execPath, [
-		'--input-type=commonjs',
-		'--eval',
-		fs.readFileSync(path.join(__dirname, '../src/resolve_typescript.cjs'), 'utf8'),
-		'--',
-		'--zed-typescript-resolve',
-		root,
-		'',
-	], { cwd: extensionWorkDirectory, encoding: 'utf8' });
+	const output = hostProbe(root, '', { cwd: extensionWorkDirectory });
 	assert.equal(output.status, 0);
 	assert.deepEqual(JSON.parse(output.stdout), {
 		platform: { os: process.platform, arch: process.arch },
@@ -263,20 +283,38 @@ test('dependency section precedence is preserved when preferring the canonical k
 
 test('host probe reports the specific invalid tsdk error', t => {
 	const root = project(t);
-	const output = spawnSync(process.execPath, [
-		'--input-type=commonjs',
-		'--eval',
-		fs.readFileSync(path.join(__dirname, '../src/resolve_typescript.cjs'), 'utf8'),
-		'--',
-		'--zed-typescript-resolve',
-		root,
-		'missing',
-	], { encoding: 'utf8' });
+	const output = hostProbe(root, 'missing');
 	assert.equal(output.status, 1);
 	assert.deepEqual(JSON.parse(output.stdout), {
 		error: 'tsdk.path must point to an installed TypeScript 7+ package with a launcher for this platform',
 	});
 	assert.equal(output.stderr, '');
+});
+
+test('Windows command shims preserve local discovery, managed fallback and resolver errors', {
+	skip: process.platform !== 'win32',
+}, t => {
+	const root = path.join(project(t), 'project with spaces');
+	json(root, { dependencies: { typescript: '^7' } });
+	const missing = hostProbe(root, '', { throughCommandShell: true });
+	assert.equal(missing.error, undefined);
+	assert.equal(missing.status, 0, missing.stderr);
+	assert.equal(missing.stderr, '');
+	assert.deepEqual(JSON.parse(missing.stdout), {
+		platform: { os: process.platform, arch: process.arch },
+		package: null,
+	});
+	const directory = pkg(root);
+	const installed = hostProbe(root, '', { throughCommandShell: true });
+	assert.equal(installed.status, 0, installed.stderr);
+	assert.equal(installed.stderr, '');
+	assert.equal(JSON.parse(installed.stdout).package.packageDirectory, directory);
+	const invalid = hostProbe(root, 'missing', { throughCommandShell: true });
+	assert.equal(invalid.status, 1, invalid.stderr);
+	assert.equal(invalid.stderr, '');
+	assert.deepEqual(JSON.parse(invalid.stdout), {
+		error: 'tsdk.path must point to an installed TypeScript 7+ package with a launcher for this platform',
+	});
 });
 
 test('unexpected probe errors do not expose arbitrary error details', () => {
