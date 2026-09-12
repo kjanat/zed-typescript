@@ -6,9 +6,19 @@ pub const TYPESCRIPT_PACKAGE: &str = "typescript";
 pub struct RequestedTypescriptSpec {
     pub install_spec: String,
     pub exact_version: Option<String>,
+    pub include_prereleases: bool,
 }
 
 impl RequestedTypescriptSpec {
+    pub fn uses_github(&self) -> bool {
+        // Nightly/prerelease pins may exist only on npm.
+        self.include_prereleases
+            || self.install_spec == "latest"
+            || self.exact_version.as_deref().is_some_and(|version| {
+                semver::Version::parse(version).is_ok_and(|version| version.pre.is_empty())
+            })
+    }
+
     fn matches_installed(&self, installed: Option<&str>) -> bool {
         self.exact_version.as_deref().is_some_and(|exact_version| {
             installed.is_some_and(|installed| installed == exact_version)
@@ -27,33 +37,71 @@ pub fn requested_typescript_spec(
         return Ok(RequestedTypescriptSpec {
             install_spec: version.to_string(),
             exact_version: exact_version(version),
+            include_prereleases: false,
         });
     }
 
     let Some(channel) = settings::string_setting(ext_settings, ExtensionSetting::UpdateChannel)?
     else {
-        return latest_stable_spec();
+        return Ok(latest_request());
     };
 
     match channel.as_str() {
-        "latest" => latest_stable_spec(),
+        "latest" => Ok(latest_request()),
+        "prerelease" => Ok(RequestedTypescriptSpec {
+            include_prereleases: true,
+            ..latest_request()
+        }),
         "next" => Ok(RequestedTypescriptSpec {
             install_spec: "next".to_string(),
             exact_version: None,
+            include_prereleases: false,
         }),
         _ => Err(format!(
-            "unsupported TypeScript update channel `{channel}`; expected `latest` or `next`"
+            "unsupported TypeScript update channel `{channel}`; expected `latest`, `prerelease` or `next`"
         )),
     }
 }
 
-fn latest_stable_spec() -> Result<RequestedTypescriptSpec> {
+fn latest_request() -> RequestedTypescriptSpec {
+    RequestedTypescriptSpec {
+        install_spec: "latest".into(),
+        exact_version: None,
+        include_prereleases: false,
+    }
+}
+
+/// Resolve npm's latest tag only when npm is the selected installation source.
+pub fn npm_spec(requested: RequestedTypescriptSpec) -> Result<RequestedTypescriptSpec> {
+    // A custom Node runtime needs npm's launcher. Resolve the GitHub channel
+    // first so it still runs the selected release, rather than npm's latest tag.
+    if requested.include_prereleases {
+        let release = zed::latest_github_release(
+            "microsoft/TypeScript",
+            zed::GithubReleaseOptions {
+                require_assets: true,
+                pre_release: true,
+            },
+        )?;
+        let version = exact_version(&release.version)
+            .ok_or_else(|| "Invalid TypeScript version in GitHub release".to_string())?;
+        ensure_typescript_7_or_newer(&version)?;
+        return Ok(RequestedTypescriptSpec {
+            install_spec: version.clone(),
+            exact_version: Some(version),
+            include_prereleases: false,
+        });
+    }
+    if requested.install_spec != "latest" {
+        return Ok(requested);
+    }
     match zed::npm_package_latest_version(TYPESCRIPT_PACKAGE) {
         Ok(latest) => {
             ensure_typescript_7_or_newer(&latest)?;
             Ok(RequestedTypescriptSpec {
                 install_spec: latest.clone(),
                 exact_version: Some(latest),
+                include_prereleases: false,
             })
         }
         // registry unreachable (offline, proxy): reuse an existing managed 7+
@@ -63,6 +111,7 @@ fn latest_stable_spec() -> Result<RequestedTypescriptSpec> {
                 Ok(RequestedTypescriptSpec {
                     install_spec: installed.clone(),
                     exact_version: Some(installed),
+                    include_prereleases: false,
                 })
             }
             _ => Err(error),
@@ -163,17 +212,10 @@ pub fn ensure_typescript_7_or_newer(version: &str) -> Result<()> {
 }
 
 fn exact_version(version: &str) -> Option<String> {
-    let v = version.strip_prefix('v').unwrap_or(version).trim();
-    if v.is_empty() {
-        return None;
-    }
-    if !v.chars().next().unwrap_or(' ').is_ascii_digit() {
-        return None;
-    }
-    let ok = v
-        .chars()
-        .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c.is_ascii_alphabetic());
-    if ok { Some(v.to_string()) } else { None }
+    let v = version.trim().strip_prefix('v').unwrap_or(version.trim());
+    semver::Version::parse(v)
+        .ok()
+        .map(|version| version.to_string())
 }
 
 #[cfg(test)]
@@ -197,5 +239,57 @@ mod tests {
         assert_eq!(exact_version("latest"), None);
         assert_eq!(exact_version("next"), None);
         assert_eq!(exact_version("^7"), None);
+        assert_eq!(exact_version("7"), None);
+        assert_eq!(exact_version("7.0"), None);
+        assert_eq!(exact_version("7.0.x"), None);
+        assert_eq!(exact_version("7.0.0garbage"), None);
+    }
+
+    #[test]
+    fn prerelease_channel_is_opt_in_and_version_still_wins() {
+        let settings = Some(zed::serde_json::json!({"updateChannel": "prerelease"}));
+        let requested = requested_typescript_spec(&settings).unwrap();
+        assert!(requested.uses_github());
+        assert!(requested.include_prereleases);
+        assert!(requested.exact_version.is_none());
+        assert!(
+            !requested_typescript_spec(&None)
+                .unwrap()
+                .include_prereleases
+        );
+
+        for version in ["7.0.2", "next", "prerelease"] {
+            let settings =
+                Some(zed::serde_json::json!({"version": version, "updateChannel": "prerelease"}));
+            let requested = requested_typescript_spec(&settings).unwrap();
+            assert!(!requested.include_prereleases);
+            assert_eq!(requested.install_spec, version);
+        }
+    }
+
+    #[test]
+    fn managed_source_preserves_npm_tags_and_ranges() {
+        for (spec, github) in [
+            ("7.0.2", true),
+            ("v7.0.2", true),
+            ("7.0.0-dev.20260912", false),
+            ("latest", true),
+            ("next", false),
+            ("beta", false),
+            ("7", false),
+            ("7.0.x", false),
+            ("^7.0.0", false),
+            (">=6 <7 || >=7", false),
+        ] {
+            let settings = Some(zed::serde_json::json!({ "version": spec }));
+            assert_eq!(
+                requested_typescript_spec(&settings).unwrap().uses_github(),
+                github,
+                "{spec}"
+            );
+        }
+        assert!(requested_typescript_spec(&None).unwrap().uses_github());
+        let settings = Some(zed::serde_json::json!({"version": "next", "updateChannel": "latest"}));
+        assert!(!requested_typescript_spec(&settings).unwrap().uses_github());
     }
 }

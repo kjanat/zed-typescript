@@ -23,6 +23,11 @@ kind    = "npm:install"
 package = "typescript"
 
 [[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["microsoft", "TypeScript", "releases", "download", "*", "*"]
+
+[[capabilities]]
 kind    = "process:exec"
 command = "*"
 args    = ["--input-type=commonjs", "--eval", "*", "--", "--zed-typescript-resolve", "*", "*"]

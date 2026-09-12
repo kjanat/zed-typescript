@@ -1,3 +1,4 @@
+mod github_package;
 mod host_platform;
 mod project_package;
 mod settings;
@@ -19,6 +20,7 @@ impl TypeScriptExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
         ext_settings: &Option<zed::serde_json::Value>,
+        require_node_shim: bool,
     ) -> Result<project_package::ResolvedPackage> {
         let tsdk = settings::string_setting(ext_settings, ExtensionSetting::TsdkPath)?;
         let discovery = project_package::resolve(worktree, tsdk.as_deref())?;
@@ -26,8 +28,12 @@ impl TypeScriptExtension {
             return Ok(package);
         }
         // no usable local TypeScript 7+ dep, fall back to a managed install
-
-        let directory = self.install_managed(language_server_id, ext_settings)?;
+        let directory = self.install_managed(
+            language_server_id,
+            ext_settings,
+            require_node_shim,
+            &discovery.platform,
+        )?;
         let native = typescript_package::find_native_server_binary(&directory, &discovery.platform);
         let shim = typescript_package::node_shim_path(&directory).ok();
         Ok(project_package::ResolvedPackage {
@@ -41,6 +47,8 @@ impl TypeScriptExtension {
         &mut self,
         language_server_id: &LanguageServerId,
         ext_settings: &Option<zed::serde_json::Value>,
+        require_node_shim: bool,
+        platform: &host_platform::Platform,
     ) -> Result<String> {
         zed::set_language_server_installation_status(
             language_server_id,
@@ -49,9 +57,38 @@ impl TypeScriptExtension {
 
         let requested = typescript_package::requested_typescript_spec(ext_settings)?;
 
+        if !require_node_shim && requested.uses_github() {
+            return github_package::install(
+                language_server_id,
+                requested.exact_version.as_deref(),
+                requested.include_prereleases,
+                platform,
+            )
+            .or_else(|error| {
+                // Preserve offline startup for users upgrading from the npm installer.
+                if requested.exact_version.is_none()
+                    && !requested.include_prereleases
+                    && let Ok(Some(version)) = zed::npm_package_installed_version("typescript")
+                    && typescript_package::ensure_typescript_7_or_newer(&version).is_ok()
+                    && semver::Version::parse(&version).is_ok_and(|v| v.pre.is_empty())
+                    && let Ok(directory) = typescript_package::managed_package_dir()
+                    && (typescript_package::find_native_server_binary(&directory, platform)
+                        .is_some()
+                        || typescript_package::node_shim_path(&directory).is_ok())
+                {
+                    return Ok(directory);
+                }
+                Err(error)
+            });
+        }
+        let requested = typescript_package::npm_spec(requested)?;
+
         // fast path: if spec matches exactly (pinned version), skip queries and npm
         if self.installed_spec.as_deref() == Some(requested.install_spec.as_str()) {
-            return typescript_package::managed_package_dir();
+            let directory = typescript_package::managed_package_dir()?;
+            if typescript_package::node_shim_path(&directory).is_ok() {
+                return Ok(directory);
+            }
         }
 
         let package_dir =
@@ -86,7 +123,7 @@ impl TypeScriptExtension {
                     // treat path as custom node; still resolve the tsc launcher + flags
                     // (never use which("tsc") — PATH tsc is often a volta/fnm/etc shim, not a raw JS to feed to node)
                     let package =
-                        self.resolve_package(language_server_id, worktree, &ext_settings)?;
+                        self.resolve_package(language_server_id, worktree, &ext_settings, true)?;
                     let shim = package.node_shim()?;
                     let args: Vec<String> = std::iter::once(shim)
                         .chain(lsp_args(&ext_settings)?)
@@ -98,7 +135,7 @@ impl TypeScriptExtension {
             return Ok(zed::Command { command, args, env });
         }
 
-        let package = self.resolve_package(language_server_id, worktree, &ext_settings)?;
+        let package = self.resolve_package(language_server_id, worktree, &ext_settings, false)?;
         let args = lsp_args(&ext_settings)?;
         let env = server_env(worktree, &ext_settings, binary_env)?;
 
