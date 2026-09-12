@@ -1,3 +1,5 @@
+mod host_platform;
+mod project_package;
 mod settings;
 mod typescript_package;
 
@@ -9,30 +11,30 @@ struct TypeScriptExtension {
 }
 
 impl TypeScriptExtension {
-    /// Resolves the directory of the TypeScript 7+ package to run, preferring
+    /// Resolves checked launchers for the TypeScript 7+ package to run, preferring
     /// an explicit `tsdk.path`, then a project-local dependency, then a
     /// managed install into the extension's working directory.
-    fn resolve_package_dir(
+    fn resolve_package(
         &mut self,
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
         ext_settings: &Option<zed::serde_json::Value>,
-    ) -> Result<String> {
-        if let Some(tsdk_path) = settings::string_setting(ext_settings, ExtensionSetting::TsdkPath)?
-        {
-            let dir = typescript_package::tsdk_package_dir(worktree, &tsdk_path);
-            let version = typescript_package::typescript_version_from_package_dir(&dir)
-                .map_err(|error| format!("tsdk.path `{tsdk_path}` resolved to `{dir}`: {error}"))?;
-            typescript_package::ensure_typescript_7_or_newer(&version)?;
-            return Ok(dir);
-        }
-
-        if let Some(dir) = typescript_package::find_local_typescript_package_dir(worktree) {
-            return Ok(dir);
+    ) -> Result<project_package::ResolvedPackage> {
+        let tsdk = settings::string_setting(ext_settings, ExtensionSetting::TsdkPath)?;
+        let discovery = project_package::resolve(worktree, tsdk.as_deref())?;
+        if let Some(package) = discovery.package {
+            return Ok(package);
         }
         // no usable local TypeScript 7+ dep, fall back to a managed install
 
-        self.install_managed(language_server_id, ext_settings)
+        let directory = self.install_managed(language_server_id, ext_settings)?;
+        let native = typescript_package::find_native_server_binary(&directory, &discovery.platform);
+        let shim = typescript_package::node_shim_path(&directory).ok();
+        Ok(project_package::ResolvedPackage {
+            directory,
+            native,
+            shim,
+        })
     }
 
     fn install_managed(
@@ -83,9 +85,9 @@ impl TypeScriptExtension {
                 } else {
                     // treat path as custom node; still resolve the tsc launcher + flags
                     // (never use which("tsc") — PATH tsc is often a volta/fnm/etc shim, not a raw JS to feed to node)
-                    let package_dir =
-                        self.resolve_package_dir(language_server_id, worktree, &ext_settings)?;
-                    let shim = typescript_package::node_shim_path(&package_dir)?;
+                    let package =
+                        self.resolve_package(language_server_id, worktree, &ext_settings)?;
+                    let shim = package.node_shim()?;
                     let args: Vec<String> = std::iter::once(shim)
                         .chain(lsp_args(&ext_settings)?)
                         .collect();
@@ -96,15 +98,15 @@ impl TypeScriptExtension {
             return Ok(zed::Command { command, args, env });
         }
 
-        let package_dir = self.resolve_package_dir(language_server_id, worktree, &ext_settings)?;
+        let package = self.resolve_package(language_server_id, worktree, &ext_settings)?;
         let args = lsp_args(&ext_settings)?;
         let env = server_env(worktree, &ext_settings, binary_env)?;
 
         // 2. run the native server binary directly when the platform package is
         //    resolvable — no Node process involved.
-        if let Some(native) = typescript_package::find_native_server_binary(&package_dir) {
+        if let Some(native) = package.native.as_ref() {
             return Ok(zed::Command {
-                command: native,
+                command: native.clone(),
                 args,
                 env,
             });
@@ -113,12 +115,8 @@ impl TypeScriptExtension {
         // 3. fall back to the package's Node launcher, which resolves the native
         //    binary via Node module resolution (covers pnpm and exotic layouts).
         //    Prefer the user's node (volta etc) via which, else Zed's bundled node.
-        let node_cmd = if let Some(p) = worktree.which("node") {
-            p
-        } else {
-            zed::node_binary_path()?
-        };
-        let shim = typescript_package::node_shim_path(&package_dir)?;
+        let node_cmd = project_package::node_binary(worktree)?;
+        let shim = package.node_shim()?;
         let args: Vec<String> = std::iter::once(shim).chain(args).collect();
 
         Ok(zed::Command {

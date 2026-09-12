@@ -28,13 +28,33 @@ The extension resolves the TypeScript 7+ package to run, preferring the project'
 1. `tsdk.path` (explicit, version checked). Accepts the package root, its `lib` dir (VS Code
    `typescript.tsdk` convention), a `bin/tsc` path, or a platform package containing the native
    binary.
-2. Any dep (dependencies/devDependencies/peerDependencies) in the worktree `package.json` whose
-   effective package name is `typescript`: either a direct `"typescript"` dependency or an `npm:`
-   alias under any key (such as `"@typescript/native": "npm:typescript@^7"`). Verifies that the
-   installed package is >=7 and has a usable launcher. (Skips `@typescript/typescript6` compat
+2. Any dep in the worktree `package.json` (`dependencies`, `devDependencies`, `peerDependencies`, or
+   `optionalDependencies`) whose effective package name is `typescript`: a direct dependency or an
+   `npm:` alias under any key (such as `"@typescript/native": "npm:typescript@^7"`). Verifies that
+   the installed package is >=7 and has a usable launcher. (Skips `@typescript/typescript6` compat
    aliases.)
 3. Otherwise: managed `npm install typescript` into the extension's own directory (version >=7
    enforced).
+
+Project and host discovery run a short-lived helper using Node from the worktree's `PATH`, falling
+back to Zed's Node runtime when no Node is found there. The helper uses the extension's
+`process:exec` capability. This allows it to inspect installed packages outside the extension's WASM
+filesystem. It follows ancestor `node_modules` directories and pnpm symlinks, checks the installed
+package name and version, and returns the native binary or Node launcher path. `catalog:`, named
+catalogs, and `workspace:`/`link:`/`file:` dependencies are identified from their installed
+metadata, including aliases. No catalog parsing or package-manager command is needed. Missing,
+outdated, or unusable project installations fall back to the managed install; an invalid explicit
+`tsdk.path` reports an error.
+
+Discovery starts from the opened worktree's `package.json`. It does not choose among child
+workspaces with different TypeScript versions, and Yarn PnP layouts without `node_modules` are not
+supported by automatic discovery. Use `tsdk.path` to select a specific installation.
+
+For a FreeBSD server host, install Node and make `node` available on the worktree's `PATH`. Zed's
+managed Node downloader does not support FreeBSD. The helper detects the server host's OS and
+architecture, including FreeBSD x64 and arm64, to locate the corresponding native platform package.
+Discovery does not use Zed's restricted platform enums. Managed installations additionally need an
+npm runtime usable by Zed on the server host.
 
 For managed installs, `version` wins over `updateChannel`:
 
@@ -209,6 +229,9 @@ Preferences set via the configuration sections update live on `workspace/didChan
 Prerequisite: Rust installed with `rustup`.
 
 In Zed, run `zed: install dev extension` and select this directory.
+
+Run `cargo test` for the Rust tests and `node --test tests/resolve_typescript.test.cjs` for the host
+resolver tests. After changing the extension, use **Rebuild** on Zed's Extensions page.
 
 After edits, rebuild from the Extensions page.\
 For logs, run Zed with `zed --foreground` or use `zed: open log`.
