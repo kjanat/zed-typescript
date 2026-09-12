@@ -307,3 +307,41 @@ test('unexpected probe errors do not expose arbitrary error details', () => {
 	assert.equal(hostProcess.exitCode, 1);
 	assert.deepEqual(JSON.parse(stdout), { error: 'Could not resolve a usable TypeScript 7+ package' });
 });
+
+test('host probe works without Object.hasOwn for local and managed resolution', t => {
+	for (const installed of [false, true]) {
+		const root = project(t);
+		json(root, { dependencies: { alias: 'npm:typescript@^7', typescript: '^7' } });
+		let canonical;
+		if (installed) {
+			pkg(root, 'alias');
+			canonical = pkg(root);
+		}
+		let stdout = '';
+		const hostProcess = {
+			platform: process.platform,
+			arch: process.arch,
+			argv: ['node', '--zed-typescript-resolve', root, ''],
+			stdout: {
+				write: text => {
+					stdout += text;
+				},
+			},
+			exitCode: 0,
+		};
+		// Remove the newer API only inside this VM, as on Node before 16.9.
+		vm.runInNewContext(
+			'Object.hasOwn = undefined;\n' + fs.readFileSync(path.join(__dirname, '../src/resolve_typescript.cjs'), 'utf8'),
+			{
+				require,
+				module: { exports: {} },
+				process: hostProcess,
+			},
+		);
+		assert.equal(hostProcess.exitCode, 0);
+		const result = JSON.parse(stdout);
+		assert.deepEqual(result.platform, { os: process.platform, arch: process.arch });
+		if (installed) assert.equal(result.package.packageDirectory, canonical);
+		else assert.equal(result.package, null);
+	}
+});

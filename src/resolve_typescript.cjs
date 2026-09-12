@@ -105,8 +105,9 @@ function resolveTypescript(root, tsdk = '') {
 		const dependencies = manifest[section];
 		if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) continue;
 		const keys = Object.keys(dependencies).sort();
-		if (Object.hasOwn(dependencies, 'typescript')) {
-			keys.splice(keys.indexOf('typescript'), 1);
+		const canonicalIndex = keys.indexOf('typescript');
+		if (canonicalIndex > 0) {
+			keys.splice(canonicalIndex, 1);
 			keys.unshift('typescript');
 		}
 		for (const key of keys) {

@@ -19,6 +19,13 @@ impl RequestedTypescriptSpec {
             })
     }
 
+    pub fn can_reuse_managed_version(&self, installed: &str) -> bool {
+        !self.include_prereleases
+            && (self.install_spec == "latest" || self.matches_installed(Some(installed)))
+            && semver::Version::parse(installed)
+                .is_ok_and(|version| version.major >= 7 && version.pre.is_empty())
+    }
+
     fn matches_installed(&self, installed: Option<&str>) -> bool {
         self.exact_version.as_deref().is_some_and(|exact_version| {
             installed.is_some_and(|installed| installed == exact_version)
@@ -261,6 +268,40 @@ fn exact_version(version: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_npm_fallback_respects_exact_pins_and_release_channels() {
+        for pin in ["7.0.2", "v7.0.2"] {
+            let request =
+                requested_typescript_spec(&Some(zed::serde_json::json!({"version": pin}))).unwrap();
+            assert!(request.can_reuse_managed_version("7.0.2"));
+            for other in [
+                "7.0.1",
+                "7.0.3",
+                "8.0.0",
+                "7.0.2-beta.1",
+                "6.0.2",
+                "invalid",
+            ] {
+                assert!(!request.can_reuse_managed_version(other), "{pin}: {other}");
+            }
+        }
+        for settings in [None, Some(zed::serde_json::json!({"version": "latest"}))] {
+            let request = requested_typescript_spec(&settings).unwrap();
+            assert!(request.can_reuse_managed_version("7.0.2"));
+            assert!(request.can_reuse_managed_version("8.0.0"));
+            assert!(!request.can_reuse_managed_version("7.1.0-beta.1"));
+            assert!(!request.can_reuse_managed_version("6.0.2"));
+        }
+        for settings in [
+            zed::serde_json::json!({"updateChannel": "prerelease"}),
+            zed::serde_json::json!({"updateChannel": "next"}),
+            zed::serde_json::json!({"version": "^7"}),
+        ] {
+            let request = requested_typescript_spec(&Some(settings)).unwrap();
+            assert!(!request.can_reuse_managed_version("7.0.2"));
+        }
+    }
+
     #[test]
     fn npm_prerelease_offline_restart_requires_its_installed_selection() {
         let directory =

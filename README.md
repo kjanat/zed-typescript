@@ -68,7 +68,8 @@ installation directories and publish only after validation; existing launch path
 Stable and prerelease channels keep separate cache selections, so switching back to stable also
 stays stable offline. When a release lookup is unavailable, that channel's previous cached release
 can still start. An existing stable managed npm installation can also be reused if the default
-GitHub installation fails. Exact versions never fall back to a different version.
+GitHub installation fails. For an exact version pin, this fallback requires the same installed
+version. Exact versions never fall back to a different version.
 
 An explicit Node runtime in `binary.path` keeps using npm for managed installations because it needs
 the package's `bin/tsc` launcher. With the prerelease channel, npm installs the exact version

@@ -66,11 +66,8 @@ impl TypeScriptExtension {
             )
             .or_else(|error| {
                 // Preserve offline startup for users upgrading from the npm installer.
-                if requested.exact_version.is_none()
-                    && !requested.include_prereleases
-                    && let Ok(Some(version)) = zed::npm_package_installed_version("typescript")
-                    && typescript_package::ensure_typescript_7_or_newer(&version).is_ok()
-                    && semver::Version::parse(&version).is_ok_and(|v| v.pre.is_empty())
+                if let Ok(Some(version)) = zed::npm_package_installed_version("typescript")
+                    && requested.can_reuse_managed_version(&version)
                     && let Ok(directory) = typescript_package::managed_package_dir()
                     && (typescript_package::find_native_server_binary(&directory, platform)
                         .is_some()
