@@ -497,7 +497,7 @@ mod tests {
         let root = Fixture::new();
         let mut host = FakeHost::new();
         let platform = Platform::new("linux", "x64").unwrap();
-        host.version = "7.1.0-beta.1".into();
+        host.version = "7.1.0-beta".into();
         let preview = install_with(&root.0, &platform, None, true, &mut host).unwrap();
         host.offline = true;
         assert!(install_with(&root.0, &platform, None, false, &mut host).is_err());

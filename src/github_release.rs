@@ -2,6 +2,24 @@ use zed_extension_api::{self as zed, Result};
 
 const PAGE_SIZE: usize = 100;
 
+fn tag_version(tag: &str) -> Option<semver::Version> {
+    let value = tag.strip_prefix('v').unwrap_or(tag);
+    if let Ok(version) = semver::Version::parse(value) {
+        return Some(version);
+    }
+    let (base, prerelease) = value.split_once('-')?;
+    // TypeScript publishes beta as X.Y.0-beta and RC as X.Y.1-rc.
+    let patch = match prerelease {
+        "beta" => 0,
+        "rc" => 1,
+        _ => return None,
+    };
+    if base.split('.').count() != 2 {
+        return None;
+    }
+    semver::Version::parse(&format!("{base}.{patch}-{prerelease}")).ok()
+}
+
 /// Select a compiler release, excluding other products published in the repository.
 pub fn latest(include_prereleases: bool) -> Result<zed::GithubRelease> {
     latest_with(include_prereleases, |page| {
@@ -50,7 +68,7 @@ fn compiler_release(
     let tag = release["tag_name"].as_str().ok_or_else(malformed)?;
     let draft = release["draft"].as_bool().ok_or_else(malformed)?;
     let prerelease = release["prerelease"].as_bool().ok_or_else(malformed)?;
-    let Ok(version) = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)) else {
+    let Some(version) = tag_version(tag) else {
         return Ok(None);
     };
     if draft
@@ -83,7 +101,7 @@ fn compiler_release(
         return Ok(None);
     }
     Ok(Some(zed::GithubRelease {
-        version: tag.to_string(),
+        version: format!("v{version}"),
         assets,
     }))
 }
@@ -107,6 +125,46 @@ mod tests {
 
     fn page(releases: Vec<Value>) -> Vec<u8> {
         zed::serde_json::to_vec(&releases).unwrap()
+    }
+
+    #[test]
+    fn abbreviated_prereleases_select_package_versions_and_preserve_urls() {
+        for (tag, expected) in [("v7.1-beta", "v7.1.0-beta"), ("v7.1-rc", "v7.1.1-rc")] {
+            let url = format!(
+                "https://github.com/microsoft/TypeScript/releases/download/{tag}/typescript-win32-x64.tgz"
+            );
+            let mut candidate = release(tag, true, false, "typescript-win32-x64.tgz");
+            candidate["assets"][0]["browser_download_url"] = json!(url);
+            let releases = page(vec![
+                candidate,
+                release("v7.0.2", false, false, "typescript.tgz"),
+            ]);
+            let selected = latest_with(true, |_| Ok(releases.clone())).unwrap();
+            assert_eq!(selected.version, expected);
+            assert_eq!(selected.assets[0].download_url, url);
+            assert_eq!(
+                latest_with(false, |_| Ok(releases.clone()))
+                    .unwrap()
+                    .version,
+                "v7.0.2"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_normalization_is_limited_to_abbreviated_beta_and_rc() {
+        for value in [
+            "v7-beta",
+            "v7.1-preview",
+            "v7.1-beta.1",
+            "v07.1-beta",
+            "vscode-typescript/v1.0.1",
+        ] {
+            assert_eq!(tag_version(value), None);
+        }
+        for value in ["7.1.0-beta", "7.1.1-rc", "7.1.0-beta.2", "7.0.2"] {
+            assert_eq!(tag_version(value).unwrap().to_string(), value);
+        }
     }
 
     #[test]
@@ -147,7 +205,7 @@ mod tests {
     #[test]
     fn unsupported_tags_and_noncompiler_assets_are_skipped() {
         let releases = page(vec![
-            release("v7.1-beta", true, false, "typescript.tgz"),
+            release("v7.1-preview", true, false, "typescript.tgz"),
             release("garbage", false, false, "typescript.tgz"),
             release("v7.3.0", false, false, "extension.vsix"),
             release("v7.2.0", false, false, "typescript-.tgz"),

@@ -301,7 +301,7 @@ mod tests {
             std::env::temp_dir().join(format!("typescript-npm-prerelease-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(directory.join("bin")).unwrap();
-        for version in ["7.1.0-beta.1", "7.0.2"] {
+        for version in ["7.1.0-beta", "7.1.1-rc", "7.1.0-beta.1", "7.0.2"] {
             std::fs::write(
                 directory.join("package.json"),
                 zed::serde_json::json!({

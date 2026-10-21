@@ -64,6 +64,8 @@ For managed installs, `version` wins over `updateChannel`:
 
 GitHub discovery selects TypeScript 7+ semantic-version releases with compiler archives, skipping
 unrelated releases such as `vscode-typescript/v1.0.1`. It checks further release pages when needed.
+Abbreviated beta and RC tags resolve to their package versions (`v7.1-beta` to `7.1.0-beta`,
+`v7.1-rc` to `7.1.1-rc`), preserving the original release asset URLs.
 
 GitHub installations include the native executable and its standard libraries. Each version is
 cached separately and reused after a complete download. Concurrent downloads use independent
