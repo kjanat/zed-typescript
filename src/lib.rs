@@ -1,4 +1,5 @@
 mod github_package;
+mod github_release;
 mod host_platform;
 mod project_package;
 mod settings;
