@@ -25,13 +25,7 @@ impl ReleaseHost for ZedHost<'_> {
     ) -> Result<zed::GithubRelease> {
         match version {
             Some(version) => zed::github_release_by_tag_name(REPOSITORY, &format!("v{version}")),
-            None => zed::latest_github_release(
-                REPOSITORY,
-                zed::GithubReleaseOptions {
-                    require_assets: true,
-                    pre_release: include_prereleases,
-                },
-            ),
+            None => crate::github_release::latest(include_prereleases),
         }
     }
 

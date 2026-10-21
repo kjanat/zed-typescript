@@ -83,14 +83,7 @@ pub fn npm_spec(requested: RequestedTypescriptSpec) -> Result<RequestedTypescrip
     // A custom Node runtime needs npm's launcher. Resolve the GitHub channel
     // first so it still runs the selected release, rather than npm's latest tag.
     if requested.include_prereleases {
-        let release = zed::latest_github_release(
-            "microsoft/TypeScript",
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: true,
-            },
-        )
-        .map(|release| release.version);
+        let release = crate::github_release::latest(true).map(|release| release.version);
         return npm_prerelease_spec(release, std::path::Path::new(&managed_package_dir()?));
     }
     if requested.install_spec != "latest" {
